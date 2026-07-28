@@ -86,6 +86,22 @@ HISTORY_LENGTH = 10
 COMMAND_WINDOW_RADIUS = 10
 """``L``: the reference window has 2L+1 = 21 tokens (paper Sec. III-B)."""
 
+# Table II, command perturbation -- per *channel*, not a single magnitude:
+#   base linear velocity  +-0.5  m/s
+#   base angular velocity +-0.52 rad/s
+#   gravity direction      0.05
+#   joint pose            +-0.1  rad
+# One token is [v_ref(3), w_ref(3), g_ref(3), q_ref(29)] = 38 channels; the window is
+# 21 such tokens flattened. mjlab's UniformNoiseCfg accepts a per-dimension tuple, so
+# the pattern is tiled to the full flat width rather than approximated by a scalar
+# (a single +-0.1 would under-perturb velocities 5x and over-perturb gravity 2x).
+_COMMAND_TOKEN_NOISE: tuple[float, ...] = (
+  (0.5,) * 3 + (0.52,) * 3 + (0.05,) * 3 + (0.1,) * 29
+)
+COMMAND_WINDOW_NOISE: tuple[float, ...] = (
+  _COMMAND_TOKEN_NOISE * (2 * COMMAND_WINDOW_RADIUS + 1)
+)
+
 # Table II command perturbations, reused as reference-state-initialisation noise.
 VELOCITY_RANGE = {
   "x": (-0.5, 0.5),
@@ -213,10 +229,11 @@ def make_ex_grmt_env_cfg(
         "window": ObservationTermCfg(
           func=mdp.motion_command_window,
           params={"command_name": "motion"},
-          # Table II command perturbations. Applied uniformly across the window;
-          # per-channel magnitudes would need a per-token noise vector, which mjlab's
-          # scalar UniformNoiseCfg does not express.
-          noise=Unoise(n_min=-0.1, n_max=0.1),
+          # Table II command perturbations, per channel (see COMMAND_WINDOW_NOISE).
+          noise=Unoise(
+            n_min=tuple(-x for x in COMMAND_WINDOW_NOISE),
+            n_max=COMMAND_WINDOW_NOISE,
+          ),
         )
       },
       concatenate_terms=True,
