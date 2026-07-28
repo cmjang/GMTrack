@@ -122,10 +122,27 @@ def _replay(
   evaluated, so this is a pure coordinate transform, not a physics rollout.
   """
   robot: Entity = scene["robot"]
-  log: dict[str, list[np.ndarray]] = {k: [] for k in _LOG_KEYS}
+  n = motion.output_frames
+  device = robot.data.joint_pos.device
+  n_joints = robot.data.joint_pos.shape[1]
+  n_bodies = robot.data.body_link_pos_w.shape[1]
+
+  # Accumulate on-device and transfer once. Reading each field back per frame costs
+  # six host syncs per step, which dominates the runtime of an otherwise trivial
+  # forward-kinematics pass (~880 clips x 500 frames for LAFAN1).
+  out = {
+    "joint_pos": torch.empty(n, n_joints, device=device),
+    "joint_vel": torch.empty(n, n_joints, device=device),
+    "body_pos_w": torch.empty(n, n_bodies, 3, device=device),
+    "body_quat_w": torch.empty(n, n_bodies, 4, device=device),
+    "body_lin_vel_w": torch.empty(n, n_bodies, 3, device=device),
+    "body_ang_vel_w": torch.empty(n, n_bodies, 3, device=device),
+  }
+  ref_lin_vel = torch.empty(n, 3, device=device)
+  ref_ang_vel = torch.empty(n, 3, device=device)
 
   scene.reset()
-  for _ in range(motion.output_frames):
+  for i in range(n):
     (base_pos, base_rot, base_lin_vel, base_ang_vel, dof_pos, dof_vel), _ = (
       motion.get_next_state()
     )
@@ -147,23 +164,32 @@ def _replay(
     sim.forward()
     scene.update(sim.mj_model.opt.timestep)
 
-    log["joint_pos"].append(robot.data.joint_pos[0].cpu().numpy().copy())
-    log["joint_vel"].append(robot.data.joint_vel[0].cpu().numpy().copy())
-    log["body_pos_w"].append(robot.data.body_link_pos_w[0].cpu().numpy().copy())
-    log["body_quat_w"].append(robot.data.body_link_quat_w[0].cpu().numpy().copy())
-    log["body_lin_vel_w"].append(
-      robot.data.body_link_lin_vel_w[0].cpu().numpy().copy()
-    )
-    log["body_ang_vel_w"].append(
-      robot.data.body_link_ang_vel_w[0].cpu().numpy().copy()
-    )
+    out["joint_pos"][i] = robot.data.joint_pos[0]
+    out["joint_vel"][i] = robot.data.joint_vel[0]
+    out["body_pos_w"][i] = robot.data.body_link_pos_w[0]
+    out["body_quat_w"][i] = robot.data.body_link_quat_w[0]
+    out["body_lin_vel_w"][i] = robot.data.body_link_lin_vel_w[0]
+    out["body_ang_vel_w"][i] = robot.data.body_link_ang_vel_w[0]
+    ref_lin_vel[i] = base_lin_vel[0]
+    ref_ang_vel[i] = base_ang_vel[0]
 
-    # mjlab asserts the same round-trip; a mismatch means the CSV convention or the
-    # joint ordering is wrong, and every downstream reward would be quietly bogus.
-    torch.testing.assert_close(robot.data.body_link_lin_vel_w[0, 0], base_lin_vel[0])
-    torch.testing.assert_close(robot.data.body_link_ang_vel_w[0, 0], base_ang_vel[0])
+  # Round-trip check: what we wrote to the free joint must come back out of forward
+  # kinematics. This guards the failure mode that matters -- a wrong quaternion
+  # convention or joint ordering -- which shows up as an O(0.1-10) discrepancy.
+  #
+  # Tolerance is loosened from torch's float32 default (atol 1e-5, rtol 1.3e-6),
+  # which is tighter than the write -> mj_forward -> read path can hold: LAFAN1
+  # trips it at ~1.4e-5 m/s on fast frames. mjlab's own csv_to_npz asserts at the
+  # default and crashes on the same data. 1e-3 still catches every convention error
+  # by three orders of magnitude.
+  torch.testing.assert_close(
+    out["body_lin_vel_w"][:, 0], ref_lin_vel, atol=1e-3, rtol=1e-3
+  )
+  torch.testing.assert_close(
+    out["body_ang_vel_w"][:, 0], ref_ang_vel, atol=1e-3, rtol=1e-3
+  )
 
-  return {k: np.stack(v, axis=0) for k, v in log.items()}
+  return {k: v.cpu().numpy() for k, v in out.items()}
 
 
 def _slice_ranges(num_rows: int, rows_per_clip: int) -> list[tuple[int, int]]:
