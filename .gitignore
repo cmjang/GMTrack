@@ -1,0 +1,17 @@
+__pycache__/
+*.py[oc]
+build/
+dist/
+wheels/
+*.egg-info
+.venv
+logs/
+third_party/rsl_rl/
+data/raw/
+data/motions/
+*.npz
+outputs/
+wandb/
+
+# Generated motion manifests (rebuild with scripts/prepare_motions.py)
+data/manifests/*.json

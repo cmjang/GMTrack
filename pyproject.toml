@@ -1,0 +1,78 @@
+[project]
+name = "ex-grmt"
+version = "0.1.0"
+description = "Reproduction of Extreme-RGMT: Continual Learning of Highly Dynamic Skills for Robust Generalist Humanoid Control"
+readme = "README.md"
+requires-python = ">=3.10,<3.14"
+dependencies = [
+    "mjlab>=1.5.3",
+    # Declared directly even though mjlab already pulls it in: `[tool.uv.sources]`
+    # only rewrites dependencies this project declares itself, so without this line
+    # the local editable checkout in third_party/ is silently ignored and rsl-rl is
+    # installed from PyPI instead.
+    "rsl-rl-lib==5.4.0",
+]
+
+[project.optional-dependencies]
+# Mirrors mjlab's own extras so `uv sync --extra cu128` picks CUDA wheels.
+cu128 = ["torch>=2.7.0"]
+cpu = ["torch>=2.7.0"]
+
+[build-system]
+requires = ["uv_build>=0.8.19,<0.9.0"]
+build-backend = "uv_build"
+
+[dependency-groups]
+dev = [
+    "ruff>=0.14.14",
+    "pytest>=8.0",
+    "ipdb>=0.13.13",
+]
+
+[tool.ruff]
+indent-width = 2
+src = ["src"]
+
+[tool.ruff.lint]
+select = ["E4", "E7", "E9", "F", "I", "B"]
+
+[project.entry-points."mjlab.tasks"]
+ex_grmt = "ex_grmt"
+
+[tool.uv]
+# `[tool.uv]` is project-local and is NOT inherited from mjlab, so mjlab's torch
+# index wiring has to be repeated here verbatim or we silently get CPU wheels.
+conflicts = [
+    [{ extra = "cu128" }, { extra = "cpu" }],
+]
+required-environments = [
+    "sys_platform == 'linux' and platform_machine == 'x86_64'",
+]
+
+[[tool.uv.index]]
+url = "https://pypi.org/simple"
+
+[[tool.uv.index]]
+name = "nvidia"
+url = "https://pypi.nvidia.com/"
+explicit = true
+
+[[tool.uv.index]]
+name = "pytorch-cu128"
+url = "https://download.pytorch.org/whl/cu128"
+explicit = true
+
+[[tool.uv.index]]
+name = "pytorch-cpu"
+url = "https://download.pytorch.org/whl/cpu"
+explicit = true
+
+[tool.uv.sources]
+# Local editable checkout of rsl-rl v5.4.0 so we can read/step through the source
+# we subclass in `src/ex_grmt/rsl_rl/`. Must stay at 5.4.0 (mjlab pins it exactly).
+rsl-rl-lib = { path = "third_party/rsl_rl", editable = true }
+warp-lang = { index = "nvidia", marker = "sys_platform != 'darwin'" }
+torch = [
+    { index = "pytorch-cu128", extra = "cu128", marker = "sys_platform != 'darwin'" },
+    { index = "pytorch-cpu", extra = "cpu", marker = "sys_platform != 'darwin'" },
+]
