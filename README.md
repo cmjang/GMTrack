@@ -19,7 +19,7 @@ The method is a two-stage continual-learning framework:
 ## Setup
 
 ```bash
-uv sync --extra cu128       # or --extra cpu
+uv sync
 uv run list-envs | grep ExGRMT
 ```
 
