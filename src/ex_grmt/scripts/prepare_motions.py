@@ -98,7 +98,13 @@ class Config:
   output_fps: float = 50.0
   """Control rate. Must match the policy rate (decimation 4 x 0.005 s)."""
   clip_seconds: float = 10.0
-  """Sequences longer than this are split; shorter ones are kept whole (Sec. IV-C)."""
+  """Sequences longer than this are split; shorter ones are kept whole (Sec. IV-C).
+
+  Must not exceed the environment's ``episode_length_s`` or clips become
+  uncompletable and stratification scores them all as failures.
+  """
+  min_clip_seconds: float = 1.0
+  """Trailing remainders shorter than this are dropped rather than kept as stubs."""
   output_dir: str = "data/motions"
   manifest: str = "data/manifests/all.json"
   append: bool = False
@@ -192,11 +198,23 @@ def _replay(
   return {k: v.cpu().numpy() for k, v in out.items()}
 
 
-def _slice_ranges(num_rows: int, rows_per_clip: int) -> list[tuple[int, int]]:
+def _slice_ranges(
+  num_rows: int, rows_per_clip: int, min_rows: int
+) -> list[tuple[int, int]]:
   """1-indexed inclusive ``line_range`` pairs covering the CSV.
 
-  A trailing remainder shorter than a quarter of a clip is folded into the previous
-  slice rather than emitted as a stub too short to be trackable.
+  Paper Sec. IV-C: "partition each motion sequence longer than 10 s into 10-s clips
+  while retaining shorter sequences as individual clips."
+
+  No clip may exceed ``rows_per_clip``. An earlier version folded a short trailing
+  remainder into the previous slice, which produced clips of up to 12.5 s -- longer
+  than ``episode_length_s``, so they could never be tracked to completion and
+  stratification would score every one of them as a failure.
+
+  A trailing remainder shorter than ``min_rows`` is dropped instead: it is too short
+  to carry a meaningful completion rate, and a 0.2 s "clip" would just add noise to
+  the mastered/challenging split. A whole source sequence shorter than ``min_rows``
+  is still kept, per the sentence above.
   """
   if num_rows <= rows_per_clip:
     return [(1, num_rows)]
@@ -205,12 +223,10 @@ def _slice_ranges(num_rows: int, rows_per_clip: int) -> list[tuple[int, int]]:
   start = 1
   while start <= num_rows:
     stop = min(start + rows_per_clip - 1, num_rows)
-    ranges.append((start, stop))
+    length = stop - start + 1
+    if length >= min_rows or not ranges:
+      ranges.append((start, stop))
     start = stop + 1
-
-  if len(ranges) > 1 and (ranges[-1][1] - ranges[-1][0] + 1) < rows_per_clip // 4:
-    last = ranges.pop()
-    ranges[-1] = (ranges[-1][0], last[1])
   return ranges
 
 
@@ -252,10 +268,11 @@ def main(cfg: Config) -> None:
     existing = set()
 
   rows_per_clip = int(round(cfg.clip_seconds * cfg.input_fps))
+  min_rows = int(round(cfg.min_clip_seconds * cfg.input_fps))
 
   for csv_path in tqdm(csv_files, desc="clips", unit="file"):
     num_rows = sum(1 for _ in csv_path.open())
-    ranges = _slice_ranges(num_rows, rows_per_clip)
+    ranges = _slice_ranges(num_rows, rows_per_clip, min_rows)
     multi = len(ranges) > 1
 
     for i, line_range in enumerate(ranges):

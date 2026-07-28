@@ -6,6 +6,7 @@ terms, then shadow/extend them with the task-specific ones defined here.
 
 from mjlab.envs.mdp import *  # noqa: F401, F403
 
+from .actions import *  # noqa: F403
 from .commands import *  # noqa: F403
 from .motion_library import *  # noqa: F403
 from .observations import *  # noqa: F403

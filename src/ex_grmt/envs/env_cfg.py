@@ -13,7 +13,6 @@ from __future__ import annotations
 from mjlab.asset_zoo.robots import G1_ACTION_SCALE, get_g1_robot_cfg
 from mjlab.envs import ManagerBasedRlEnvCfg
 from mjlab.envs.mdp import dr
-from mjlab.envs.mdp.actions import JointPositionActionCfg
 from mjlab.managers.action_manager import ActionTermCfg
 from mjlab.managers.command_manager import CommandTermCfg
 from mjlab.managers.event_manager import EventTermCfg
@@ -29,6 +28,7 @@ from mjlab.utils.noise import UniformNoiseCfg as Unoise
 from mjlab.viewer import ViewerConfig
 
 from ex_grmt import mdp
+from ex_grmt.mdp.actions import ReferenceResidualJointPositionActionCfg
 from ex_grmt.mdp.commands import MultiMotionCommandCfg
 
 ##
@@ -65,6 +65,20 @@ END_EFFECTORS: tuple[str, ...] = (
 
 FOOT_BODIES: tuple[str, ...] = ("left_ankle_roll_link", "right_ankle_roll_link")
 FOOT_GEOM_REGEX = r"^(left|right)_foot[1-7]_collision$"
+
+POLICY_HZ = 50.0
+"""Control rate (paper Sec. VI-C). Must match the motion clips' fps."""
+
+DEFAULT_SIM_HZ = 200.0
+"""Physics rate. MuJoCo position actuators are evaluated every physics step, so this
+is also the simulated PD rate.
+
+The paper's "the low-level PD controller operates at 500 Hz" (Sec. VI-C) describes the
+**onboard controller of the real G1**, in the hardware-deployment section; the paper
+never states a simulation timestep. 200 Hz with a 50 Hz policy is the standard
+sim-side setup and mjlab's own default, so that is what we use. Raise it if you want
+tighter contact resolution -- it costs sim time proportionally.
+"""
 
 HISTORY_LENGTH = 10
 """``H``: 10-frame proprioceptive and action history (paper Sec. III-B)."""
@@ -157,6 +171,7 @@ def make_ex_grmt_env_cfg(
   consolidation_clips: str | None = None,
   acquisition_fraction: float | None = None,
   play: bool = False,
+  sim_hz: float = DEFAULT_SIM_HZ,
 ) -> ManagerBasedRlEnvCfg:
   """Build the Extreme-RGMT tracking environment.
 
@@ -166,7 +181,12 @@ def make_ex_grmt_env_cfg(
     consolidation_clips: Mastered set ``D_m``. Required for Stage II.
     acquisition_fraction: ``xi``. None disables the PACE split (Stage I).
     play: Deterministic replay mode (no corruption, no pushes, no RSI noise).
+    sim_hz: Physics rate (= simulated PD rate). See :data:`DEFAULT_SIM_HZ`.
   """
+  if abs(sim_hz / POLICY_HZ - round(sim_hz / POLICY_HZ)) > 1e-9:
+    raise ValueError(
+      f"sim_hz={sim_hz} is not an integer multiple of the {POLICY_HZ} Hz policy rate."
+    )
 
   ##
   # Observations
@@ -224,11 +244,18 @@ def make_ex_grmt_env_cfg(
   ##
 
   actions: dict[str, ActionTermCfg] = {
-    "joint_pos": JointPositionActionCfg(
+    # Paper Eq. (3): the residual is added to the *reference* joint pose, not to the
+    # constant default pose that mjlab's JointPositionAction uses. See
+    # ex_grmt.mdp.actions for why the difference matters.
+    "joint_pos": ReferenceResidualJointPositionActionCfg(
       entity_name="robot",
       actuator_names=(".*",),
+      # ASSUMPTION: Eq. (3) writes q_ref + a_t with no scale factor. We keep mjlab's
+      # per-joint scale (0.25 * effort_limit / stiffness) so the policy's unit-ish
+      # Gaussian output maps to a sensible joint range; Table III lists no action
+      # scale, so the paper must apply an equivalent normalization implicitly.
       scale=G1_ACTION_SCALE,
-      use_default_offset=True,
+      command_name="motion",
     )
   }
 
@@ -349,11 +376,13 @@ def make_ex_grmt_env_cfg(
   ##
 
   rewards: dict[str, RewardTermCfg] = {
-    "motion_global_root_pos": RewardTermCfg(
-      func=mdp.motion_global_anchor_position_error_exp,
-      weight=0.5,
-      params={"command_name": "motion", "std": 0.3},
-    ),
+    # NOTE: Table I lists five tracking terms and does NOT include a global anchor
+    # *position* reward -- only orientation. mjlab's BeyondMimic port does include
+    # one (weight 0.5); we drop it to match the paper. The design is coherent without
+    # it: body positions are tracked relative to the anchor, global body velocities
+    # are tracked in world frame, and absolute XY drift is intentionally unpenalized
+    # because a retargeted clip's world position is arbitrary. Height is still
+    # constrained, by the `anchor_pos` termination.
     "motion_global_root_ori": RewardTermCfg(
       func=mdp.motion_global_anchor_orientation_error_exp,
       weight=0.5,
@@ -492,11 +521,14 @@ def make_ex_grmt_env_cfg(
     sim=SimulationCfg(
       nconmax=35,
       njmax=250,
-      mujoco=MujocoCfg(timestep=0.005, iterations=10, ls_iterations=20),
+      mujoco=MujocoCfg(timestep=1.0 / sim_hz, iterations=10, ls_iterations=20),
     ),
-    # 0.005 s * 4 = 50 Hz policy rate (paper Sec. VI-C). NOTE: this puts the PD
-    # controller at 200 Hz, not the paper's 500 Hz; raising it costs 2.5x sim time.
-    decimation=4,
+    # 50 Hz policy (paper Sec. VI-C) over a 200 Hz sim. Derived so the two can never
+    # drift apart: the policy rate must equal the motion clips' fps, or the reference
+    # advances at a different rate than the controller.
+    decimation=int(round(sim_hz / POLICY_HZ)),
+    # Must be >= the longest clip (prepare_motions caps clips at 10 s), otherwise a
+    # clip can never be tracked to completion and stratification scores it as failed.
     episode_length_s=10.0,
   )
 

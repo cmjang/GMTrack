@@ -98,12 +98,34 @@ class AdaptiveBinSampler:
   # -- distribution ---------------------------------------------------------
 
   def _compute_probs(self) -> torch.Tensor:
-    """Normalised ``(C, max_bins)`` sampling distribution, zero on padding."""
-    scores = torch.clamp(self.failed_ema, 0.0, self.max_count)
+    """Normalised ``(C, max_bins)`` sampling distribution, zero on padding.
+
+    Eq. (13) in order: ``s_i = Normalize(clip(c_i, 0, c_max))`` **first**, then
+    ``p_i ∝ s_i + eps_u / N``.
+
+    The order matters. Normalizing the clipped counts to sum 1 before mixing fixes
+    the uniform baseline's share at ``eps_u / (1 + eps_u)`` for the whole run. Adding
+    ``eps_u / N`` to the *unnormalized* counts instead (the mjlab formulation) makes
+    that share depend on how many failures have accumulated: near-uniform early on,
+    then progressively more peaked as the EMA grows -- an unintended implicit
+    schedule on the exploration/exploitation balance.
+    """
+    scores = torch.clamp(self.failed_ema, 0.0, self.max_count) * self.valid
+
+    total = scores.sum()
+    if total > 0:
+      scores = scores / total
+    # else: no failures recorded yet, so s_i = 0 and the uniform baseline alone
+    # defines the distribution -- which is the correct behaviour at initialization.
+
     scores = scores + self.uniform_ratio / max(self.num_valid_bins, 1)
     scores = scores * self.valid
 
     if self.kernel_size > 1:
+      # NOT in the paper: inherited from mjlab, which convolves a small non-causal
+      # kernel over the bin axis to spread credit into neighbouring bins. Disabled by
+      # default (`adaptive_kernel_size=1`); kept because it is occasionally useful
+      # when bins are narrow relative to the failure horizon.
       padded = torch.nn.functional.pad(
         scores.unsqueeze(1), (0, self.kernel_size - 1), mode="replicate"
       )
