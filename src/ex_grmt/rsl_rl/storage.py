@@ -33,6 +33,8 @@ import torch
 from rsl_rl.storage import RolloutStorage
 from tensordict import TensorDict
 
+from ex_grmt.pace import pace_env_split
+
 STAR_GROUP = "star"
 """Observation group carrying ``[difficulty_weight, bin_id]`` per transition."""
 
@@ -82,7 +84,7 @@ class StarRolloutStorage(RolloutStorage):
     self.env_split = (
       num_envs
       if acquisition_fraction is None
-      else min(max(int(acquisition_fraction * num_envs), 1), num_envs - 1)
+      else pace_env_split(acquisition_fraction, num_envs)
     )
 
     flat = torch.arange(num_transitions_per_env * num_envs, device=device)
@@ -230,8 +232,20 @@ class StarRolloutStorage(RolloutStorage):
     if n_con_pool == 0:
       acq_per_batch, con_per_batch = mini_batch_size, 0
     else:
-      acq_per_batch = max(int(round(mini_batch_size * n_acq_pool / total)), 1)
-      con_per_batch = max(mini_batch_size - acq_per_batch, 1)
+      if mini_batch_size < 2:
+        raise ValueError(
+          f"mini_batch_size={mini_batch_size} cannot hold both an acquisition and a "
+          f"consolidation row. Reduce num_mini_batches or raise num_envs."
+        )
+      # Clamped to leave room for at least one consolidation row. Without the upper
+      # clamp, a lopsided split rounds acq up to the full batch and the consolidation
+      # row is then *added* on top, silently making the batch one row larger than
+      # every other update's.
+      acq_per_batch = min(
+        max(int(round(mini_batch_size * n_acq_pool / total)), 1), mini_batch_size - 1
+      )
+      con_per_batch = mini_batch_size - acq_per_batch
+    assert acq_per_batch + con_per_batch == mini_batch_size or n_con_pool == 0
 
     pool, omega = self._build_star_pool()
     self.last_star_pool_size = int(pool.numel())

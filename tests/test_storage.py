@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import pytest
 import torch
 from tensordict import TensorDict
 
+from ex_grmt.pace import pace_env_split
 from ex_grmt.rsl_rl.storage import STAR_GROUP, StarRolloutStorage
 
 T, N, A = 6, 8, 3
@@ -134,6 +136,76 @@ def test_star_pool_empty_without_high_difficulty_transitions():
   _fill(s, torch.zeros(T, N), torch.zeros(T, N, 2))  # all weights 0 -> no H
   pool, omega = s._build_star_pool()
   assert pool.numel() == 0 and omega.numel() == 0
+
+
+##
+# PACE role split
+##
+
+
+def test_env_split_always_leaves_both_roles_populated():
+  for num_envs in (2, 3, 5, 64, 4096):
+    for xi in (0.05, 0.5, 0.8, 0.99):
+      split = pace_env_split(xi, num_envs)
+      assert 1 <= split <= num_envs - 1, (xi, num_envs, split)
+
+
+def test_env_split_rejects_single_environment():
+  """Regression: ``min(max(int(0.8*1), 1), 0)`` used to silently yield 0.
+
+  That left the acquisition group empty, so every transition would have been
+  optimized with the consolidation objective and no PPO update would occur -- with no
+  error raised anywhere.
+  """
+  with pytest.raises(ValueError, match="at least 2 environments"):
+    pace_env_split(0.8, 1)
+
+
+def test_mini_batches_have_a_constant_size():
+  """Regression: a lopsided pool used to produce one batch of size M+1.
+
+  ``con_per_batch = max(M - acq_per_batch, 1)`` forced a consolidation row on top of
+  a full acquisition batch, inflating that batch and skewing the gradient weight of
+  the duplicated rows.
+  """
+  s = _storage(acquisition_fraction=0.99)  # 7 acq envs, 1 con env out of 8
+  weights = torch.zeros(T, N)
+  _fill(s, torch.zeros(T, N), torch.stack([weights, torch.zeros(T, N)], dim=-1))
+  s.values.zero_()
+  s.returns.zero_()
+  s.actions_log_prob.zero_()
+  s.distribution_params = (torch.zeros(T, N, A), torch.zeros(T, N, A))
+  s.advantages.zero_()
+  s.raw_advantages.zero_()
+
+  # Chosen to actually reproduce the old failure: with M=4 and an acq share of
+  # 42/48, `round(4 * 0.875) == 4 == M`, so the old `max(M - acq, 1)` appended a
+  # 5th row. A coarser split rounds acq below M and hides the bug.
+  num_mini_batches = 12
+  expected = (T * N) // num_mini_batches
+  assert expected == 4
+  sizes = {
+    b.observations.batch_size[0]
+    for b in s.star_mini_batch_generator(num_mini_batches, num_epochs=2)
+  }
+  assert sizes == {expected}, sizes
+
+
+def test_mini_batch_acq_mask_matches_row_layout():
+  s = _storage(acquisition_fraction=0.5)
+  _fill(s, torch.zeros(T, N), torch.zeros(T, N, 2))
+  s.values.zero_()
+  s.returns.zero_()
+  s.actions_log_prob.zero_()
+  s.distribution_params = (torch.zeros(T, N, A), torch.zeros(T, N, A))
+  s.advantages.zero_()
+  s.raw_advantages.zero_()
+
+  for batch in s.star_mini_batch_generator(2, num_epochs=1):
+    assert batch.acq_mask is not None
+    # Acquisition rows come first, consolidation rows after; both groups non-empty.
+    assert bool(batch.acq_mask[0]) and not bool(batch.acq_mask[-1])
+    assert batch.acq_mask.numel() == batch.observations.batch_size[0]
 
 
 def test_star_disabled_yields_empty_pool():

@@ -40,6 +40,7 @@ from mjlab.utils.lab_api.math import (
 
 from ex_grmt.mdp.motion_library import MotionLibrary
 from ex_grmt.mdp.sampling import AdaptiveBinSampler
+from ex_grmt.pace import pace_env_split
 
 if TYPE_CHECKING:
   from mjlab.entity import Entity
@@ -139,17 +140,14 @@ class MultiMotionCommand(CommandTerm):
       acq_clip_ids = self._resolve_clip_ids(acq_names)
       con_clip_ids = None
     else:
-      if not 0.0 < cfg.acquisition_fraction < 1.0:
-        raise ValueError(
-          f"acquisition_fraction must be in (0, 1), got {cfg.acquisition_fraction}."
-        )
       if con_names is None:
         raise ValueError(
           "Stage II needs `consolidation_clips` (the mastered set D_m) alongside "
           "`acquisition_fraction`."
         )
-      split = int(cfg.acquisition_fraction * self.num_envs)
-      split = min(max(split, 1), self.num_envs - 1)
+      # Shared with StarRolloutStorage: the storage derives an environment's role
+      # from its index alone, so both sides must round identically.
+      split = pace_env_split(cfg.acquisition_fraction, self.num_envs)
       self.acq_env_ids = all_ids[:split]
       self.con_env_ids = all_ids[split:]
       acq_clip_ids = self._resolve_clip_ids(acq_names)
