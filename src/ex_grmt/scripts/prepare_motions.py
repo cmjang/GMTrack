@@ -21,7 +21,7 @@ Usage::
         --input-dir data/raw/lafan1 --source lafan1 --input-fps 30
 
     uv run python -m ex_grmt.scripts.prepare_motions \\
-        --input-dir data/raw/seed --source seed --input-fps 30 --append
+        --input-dir data/raw/seed --source seed --input-fps 30 --append True
 """
 
 from __future__ import annotations
@@ -108,7 +108,11 @@ class Config:
   output_dir: str = "data/motions"
   manifest: str = "data/manifests/all.json"
   append: bool = False
-  """Merge into an existing manifest instead of overwriting it."""
+  """Merge into an existing manifest instead of overwriting it.
+
+  NOTE: mjlab's tyro configuration disables implicit boolean flags, so this needs an
+  explicit value on the command line -- ``--append True``, not a bare ``--append``.
+  """
   device: str = "cuda:0"
   limit: int | None = None
   """Process at most this many CSVs. Useful for smoke tests."""

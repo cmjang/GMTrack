@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
-from ex_grmt.scripts.prepare_motions import _slice_ranges
+import mjlab
+import tyro
+
+from ex_grmt.scripts.prepare_motions import Config, _slice_ranges
 
 ROWS_PER_CLIP = 300  # 10 s at 30 fps
 MIN_ROWS = 30  # 1 s
@@ -44,6 +47,38 @@ def test_short_tail_is_dropped_not_merged():
 def test_tail_at_or_above_minimum_is_kept():
   ranges = _slice_ranges(300 + MIN_ROWS, ROWS_PER_CLIP, MIN_ROWS)
   assert ranges == [(1, 300), (301, 330)]
+
+
+def test_documented_command_lines_actually_parse():
+  """The invocations printed in the docstring / CLAUDE.md must work verbatim.
+
+  mjlab's tyro configuration disables implicit boolean flags, so a bare ``--append``
+  fails with "Missing value for argument". That is exactly the command a user copies
+  when ingesting a second motion source, and the failure is at argument-parse time
+  with no hint that the docs are wrong.
+  """
+  cfg = tyro.cli(
+    Config,
+    args=[
+      "--input-dir", "data/raw/seed",
+      "--source", "seed",
+      "--input-fps", "30",
+      "--append", "True",
+    ],
+    config=mjlab.TYRO_FLAGS,
+  )
+  assert cfg.append is True
+  assert cfg.source == "seed"
+  assert cfg.input_fps == 30.0
+
+  # The first-pass invocation, without --append.
+  cfg = tyro.cli(
+    Config,
+    args=["--input-dir", "data/raw/lafan1", "--source", "lafan1", "--input-fps", "30"],
+    config=mjlab.TYRO_FLAGS,
+  )
+  assert cfg.append is False
+  assert cfg.clip_seconds == 10.0
 
 
 def test_ranges_are_contiguous_and_non_overlapping():
