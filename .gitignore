@@ -13,5 +13,15 @@ data/motions/
 outputs/
 wandb/
 
+# Local reference code, datasets, and generated artifacts
+cankao/
+data/
+output/
+scripts/slurm/
+
+# Local paper PDFs
+2601.23080v1.pdf
+2607.20110v1.pdf
+
 # Generated motion manifests (rebuild with scripts/prepare_motions.py)
 data/manifests/*.json
