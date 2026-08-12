@@ -28,6 +28,7 @@ anything.
 from __future__ import annotations
 
 from collections.abc import Generator
+from typing import Literal
 
 import torch
 from rsl_rl.storage import RolloutStorage
@@ -37,6 +38,12 @@ from ex_grmt.pace import pace_env_split
 
 STAR_GROUP = "star"
 """Observation group carrying ``[difficulty_weight, bin_id]`` per transition."""
+
+TRACKING_FAILURES_EXTRA = "tracking_failures"
+"""Environment-extra key carrying the true (non-timeout) tracking failure mask."""
+
+ValidSampleMode = Literal["failure_prefix", "combined_done_prefix"]
+"""Supported interpretations of PACE's effective-sample prefix."""
 
 
 class StarBatch(RolloutStorage.Batch):
@@ -98,6 +105,18 @@ class StarRolloutStorage(RolloutStorage):
         num_transitions_per_env, num_envs, 1, device=device
       )
 
+    # ``dones`` is the Gymnasium union of terminated and truncated. PACE progress is
+    # about tracking failures, so keep that signal separately: clip ends and episode
+    # time limits must still terminate GAE/STAR fragments without shortening Eq. 17's
+    # effective-sample prefix.
+    self.tracking_failures = torch.zeros(
+      num_transitions_per_env, num_envs, 1, dtype=torch.bool, device=device
+    )
+    self.tracking_failure_sources = torch.zeros(
+      num_transitions_per_env, dtype=torch.uint8, device=device
+    )
+    """Per-step source: 0 missing, 1 explicit env mask, 2 derived compatibility mask."""
+
     self.last_star_pool_size = 0
     """Diagnostic: |P| from the most recent generator call."""
 
@@ -107,6 +126,111 @@ class StarRolloutStorage(RolloutStorage):
     """Flattened ``(difficulty weight, bin id)`` per transition."""
     meta = self.observations[STAR_GROUP].flatten(0, 1)
     return meta[:, 0], meta[:, 1].long()
+
+  # -- PACE valid-sample bookkeeping ---------------------------------------
+
+  def record_tracking_failures(
+    self, failures: torch.Tensor, *, derived: bool = False
+  ) -> None:
+    """Record the true tracking-failure mask for the transition being appended.
+
+    Call this immediately before :meth:`add_transition`. ``derived=True`` identifies
+    the compatibility path ``done & ~time_out``; an explicit terminated mask is
+    preferable because terminated and truncated may both be true on the same step.
+    """
+    if self.step >= self.num_transitions_per_env:
+      raise OverflowError(
+        "Rollout buffer overflow while recording tracking failures. Call clear() "
+        "before adding new transitions."
+      )
+    mask = failures.to(device=self.device, dtype=torch.bool).reshape(-1)
+    if mask.shape != (self.num_envs,):
+      raise ValueError(
+        "tracking failure mask must contain one value per environment; "
+        f"expected {(self.num_envs,)}, got {tuple(mask.shape)}."
+      )
+    self.tracking_failures[self.step, :, 0].copy_(mask)
+    self.tracking_failure_sources[self.step] = 2 if derived else 1
+
+  def clear(self) -> None:
+    """Reset the rollout cursor and failure-mask coverage diagnostics."""
+    super().clear()
+    self.tracking_failures.zero_()
+    self.tracking_failure_sources.zero_()
+
+  @staticmethod
+  def _prefix_before_first_event(events: torch.Tensor) -> torch.Tensor:
+    """Include every row up to and including the first event in each environment."""
+    prior_events = torch.zeros_like(events, dtype=torch.long)
+    prior_events[1:] = torch.cumsum(events.long(), dim=0)[:-1]
+    return prior_events == 0
+
+  def valid_sample_diagnostics(
+    self, mode: ValidSampleMode = "failure_prefix"
+  ) -> dict[str, int | str]:
+    """Return PACE counts plus failure/done provenance for audit logging.
+
+    ``failure_prefix`` is the paper implementation used by default. The legacy
+    ``combined_done_prefix`` mode remains available to reproduce older checkpoints'
+    logging and to quantify how much timeout/motion-end truncation biased ``rho``.
+    Neither mode changes which rows enter PPO, value, entropy, or Eq. 15 losses.
+    """
+    if mode not in ("failure_prefix", "combined_done_prefix"):
+      raise ValueError(
+        "valid sample mode must be 'failure_prefix' or 'combined_done_prefix', "
+        f"got {mode!r}."
+      )
+
+    populated_steps = self.num_transitions_per_env if self.step == 0 else self.step
+    sources = self.tracking_failure_sources[:populated_steps]
+    if mode == "failure_prefix" and bool((sources == 0).any()):
+      missing = int((sources == 0).sum().item())
+      raise RuntimeError(
+        f"Missing tracking failure masks for {missing}/{populated_steps} rollout "
+        f"steps. Pass extras[{TRACKING_FAILURES_EXTRA!r}] from the environment's "
+        "terminated signal (preferred), or provide time_outs for compatibility "
+        "derivation."
+      )
+
+    failures = self.tracking_failures[:populated_steps].squeeze(-1)
+    dones = self.dones[:populated_steps].squeeze(-1).bool()
+    valid_failure = self._prefix_before_first_event(failures)
+    valid_combined = self._prefix_before_first_event(dones)
+    valid = valid_failure if mode == "failure_prefix" else valid_combined
+    non_failure_dones = dones & ~failures
+
+    def role_counts(mask: torch.Tensor) -> tuple[int, int]:
+      return (
+        int(mask[:, : self.env_split].sum().item()),
+        int(mask[:, self.env_split :].sum().item()),
+      )
+
+    n_acq, n_con = role_counts(valid)
+    failure_acq, failure_con = role_counts(failures)
+    done_acq, done_con = role_counts(dones)
+    non_failure_done_acq, non_failure_done_con = role_counts(non_failure_dones)
+    legacy_acq, legacy_con = role_counts(valid_combined)
+    failure_prefix_acq, failure_prefix_con = role_counts(valid_failure)
+    return {
+      "mode": mode,
+      "valid_acq_samples": n_acq,
+      "valid_con_samples": n_con,
+      "failure_prefix_valid_acq_samples": failure_prefix_acq,
+      "failure_prefix_valid_con_samples": failure_prefix_con,
+      "combined_done_prefix_valid_acq_samples": legacy_acq,
+      "combined_done_prefix_valid_con_samples": legacy_con,
+      "valid_acq_gain_vs_combined_done": failure_prefix_acq - legacy_acq,
+      "valid_con_gain_vs_combined_done": failure_prefix_con - legacy_con,
+      "tracking_failure_acq_events": failure_acq,
+      "tracking_failure_con_events": failure_con,
+      "combined_done_acq_events": done_acq,
+      "combined_done_con_events": done_con,
+      "non_failure_done_acq_events": non_failure_done_acq,
+      "non_failure_done_con_events": non_failure_done_con,
+      "tracking_failure_explicit_steps": int((sources == 1).sum().item()),
+      "tracking_failure_derived_steps": int((sources == 2).sum().item()),
+      "tracking_failure_missing_steps": int((sources == 0).sum().item()),
+    }
 
   def fragment_ids(self) -> torch.Tensor:
     """Unique id of the maximal contiguous run each transition belongs to.
@@ -120,28 +244,86 @@ class StarRolloutStorage(RolloutStorage):
     env_ids = torch.arange(self.num_envs, device=self.device).expand_as(counter)
     return (env_ids * (self.num_transitions_per_env + 1) + counter.long()).flatten()
 
-  def normalize_advantages_by_difficulty(self, eps: float = 1e-8) -> None:
+  def _group_moments(
+    self, values: torch.Tensor, mask: torch.Tensor, distributed: bool
+  ) -> tuple[int, torch.Tensor, torch.Tensor]:
+    """Return global ``(count, mean, unbiased std)`` for a masked group."""
+    selected = values[mask]
+    stats = torch.stack(
+      (
+        torch.tensor(float(selected.numel()), device=values.device),
+        selected.sum(),
+        selected.square().sum(),
+      )
+    )
+    if distributed:
+      if not torch.distributed.is_available() or not torch.distributed.is_initialized():
+        raise RuntimeError(
+          "Distributed advantage normalization requested before torch.distributed "
+          "was initialized."
+        )
+      torch.distributed.all_reduce(stats, op=torch.distributed.ReduceOp.SUM)
+
+    count = int(stats[0].item())
+    if count == 0:
+      zero = values.new_zeros(())
+      return 0, zero, zero
+    mean = stats[1] / count
+    if count < 2:
+      return count, mean, values.new_zeros(())
+    variance = (stats[2] - count * mean.square()).clamp_min(0.0) / (count - 1)
+    return count, mean, variance.sqrt()
+
+  def normalize_acquisition_advantages(
+    self, eps: float = 1e-8, distributed: bool = False
+  ) -> None:
+    """Normalize over acquisition rows only and zero unused consolidation rows."""
+    adv = self.advantages.flatten(0, 1).squeeze(-1)
+    acq = torch.zeros_like(adv, dtype=torch.bool)
+    acq[self.acq_flat_idx] = True
+    count, mean, std = self._group_moments(adv, acq, distributed)
+    if count < 2:
+      raise RuntimeError("Advantage normalization needs at least two acquisition rows.")
+    normalized = torch.zeros_like(adv)
+    normalized[acq] = (adv[acq] - mean) / (std + eps)
+    self.advantages.copy_(
+      normalized.view(self.num_transitions_per_env, self.num_envs, 1)
+    )
+
+  def normalize_advantages_by_difficulty(
+    self, eps: float = 1e-8, distributed: bool = False
+  ) -> None:
     """Eq. (23): normalize inside ``H = {w > 1}`` and ``E = {w <= 1}`` independently.
 
     Early in training no bin has accumulated failures yet, so ``H`` can be empty or
     near-empty. Splitting then is meaningless (and a 1-sample std is undefined), so
-    this falls back to a single global normalization -- one branch or the other, never
-    both, so advantages are normalized exactly once.
+    this falls back to a single acquisition-wide normalization -- one branch or the
+    other, never both, so acquisition advantages are normalized exactly once.
     """
     adv = self.advantages.flatten(0, 1).squeeze(-1)
     weights, _ = self._star_meta()
-    high = weights > 1.0
-    low = ~high
+    acq = torch.zeros_like(adv, dtype=torch.bool)
+    acq[self.acq_flat_idx] = True
+    high = acq & (weights > 1.0)
+    low = acq & ~high
 
-    if int(high.sum()) < 2 or int(low.sum()) < 2:
-      adv = (adv - adv.mean()) / (adv.std() + eps)
+    high_stats = self._group_moments(adv, high, distributed)
+    low_stats = self._group_moments(adv, low, distributed)
+    normalized = torch.zeros_like(adv)
+    if high_stats[0] < 2 or low_stats[0] < 2:
+      count, mean, std = self._group_moments(adv, acq, distributed)
+      if count < 2:
+        raise RuntimeError(
+          "Advantage normalization needs at least two acquisition rows."
+        )
+      normalized[acq] = (adv[acq] - mean) / (std + eps)
     else:
-      adv = adv.clone()
-      for mask in (high, low):
-        sub = adv[mask]
-        adv[mask] = (sub - sub.mean()) / (sub.std() + eps)
+      for mask, (_, mean, std) in ((high, high_stats), (low, low_stats)):
+        normalized[mask] = (adv[mask] - mean) / (std + eps)
 
-    self.advantages.copy_(adv.view(self.num_transitions_per_env, self.num_envs, 1))
+    self.advantages.copy_(
+      normalized.view(self.num_transitions_per_env, self.num_envs, 1)
+    )
 
   # -- STAR pool ------------------------------------------------------------
 
@@ -300,21 +482,20 @@ class StarRolloutStorage(RolloutStorage):
           acq_mask=acq_mask_template,
         )
 
-  def valid_sample_counts(self) -> tuple[int, int]:
+  def valid_sample_counts(
+    self, mode: ValidSampleMode = "failure_prefix"
+  ) -> tuple[int, int]:
     """``(N_A, N_C)`` for PACE's progress ratio (Eq. 17).
 
-    A sample counts as *valid* when its environment had not yet terminated at that
-    step of the rollout -- i.e. steps at or before the first ``done``. Highly dynamic
-    motions terminate early, so this ratio is exactly the signal PACE uses to detect
-    that acquisition has started producing usable experience.
+    The default includes steps at or before the first *tracking failure*. Timeouts and
+    normal motion ends remain valid. Pass ``"combined_done_prefix"`` only for legacy
+    reproduction/diagnosis; it implements the old prefix ending on any ``done``.
     """
-    dones = self.dones.squeeze(-1)  # (T, N)
-    prior = torch.zeros_like(dones)
-    prior[1:] = torch.cumsum(dones, dim=0)[:-1]
-    valid = prior == 0  # (T, N)
-    n_acq = int(valid[:, : self.env_split].sum().item())
-    n_con = int(valid[:, self.env_split :].sum().item())
-    return n_acq, n_con
+    diagnostics = self.valid_sample_diagnostics(mode)
+    return (
+      int(diagnostics["valid_acq_samples"]),
+      int(diagnostics["valid_con_samples"]),
+    )
 
 
 def _wrapped_slice(perm: torch.Tensor, start: int, length: int) -> torch.Tensor:

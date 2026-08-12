@@ -18,6 +18,8 @@ from mjlab.rl import (
   RslRlPpoAlgorithmCfg,
 )
 
+from ex_grmt.rsl_rl.fsq import SONIC_PROXY_FSQ_LEVELS
+
 
 @dataclass
 class ExGRMTActorCfg(RslRlModelCfg):
@@ -39,15 +41,17 @@ class ExGRMTActorCfg(RslRlModelCfg):
   """``f_o`` hidden widths. Table III lists the encoder as [64, 128, 64]."""
   action_encoder_hidden: Tuple[int, ...] = (64,)
   """``f_a`` hidden widths. Table III: [29, 64, 64]."""
+  command_token_dim: int = 38
+  """Per-reference-token width: 38 normally, 44 with heading closed-loop input."""
   command_encoder_hidden: Tuple[int, ...] = (128,)
-  """``f_g`` hidden widths. Table III: [38, 128, 64]."""
+  """``f_g`` hidden widths after the configurable command-token input."""
   encoder_activation: str = "elu"
   num_heads: int = 4
   """ASSUMPTION: attention head count is not stated in the paper."""
   use_fsq: bool = True
   """False reproduces the "w/o FSQ" ablation (Table VIII)."""
-  fsq_levels: int = 5
-  """ASSUMPTION: quantization levels are not stated in the paper."""
+  fsq_levels: int = SONIC_PROXY_FSQ_LEVELS
+  """ASSUMPTION: paper omits this; 32 follows SONIC's matching 2 x 32 tokenizer."""
   fsq_token_dim: int = 32
   """Paper: ``u_t`` is factorized into two 32-dimensional tokens."""
   unified_encoder: bool = False

@@ -10,9 +10,10 @@ Every numeric constant traceable to the paper is tagged with its table.
 
 from __future__ import annotations
 
-from mjlab.asset_zoo.robots import G1_ACTION_SCALE, get_g1_robot_cfg
+import math
+
+from mjlab.asset_zoo.robots import G1_ACTION_SCALE
 from mjlab.envs import ManagerBasedRlEnvCfg
-from mjlab.envs.mdp import dr
 from mjlab.managers.action_manager import ActionTermCfg
 from mjlab.managers.command_manager import CommandTermCfg
 from mjlab.managers.event_manager import EventTermCfg
@@ -24,10 +25,10 @@ from mjlab.scene import SceneCfg
 from mjlab.sensor import ContactMatch, ContactSensorCfg
 from mjlab.sim import MujocoCfg, SimulationCfg
 from mjlab.terrains import TerrainEntityCfg
-from mjlab.utils.noise import UniformNoiseCfg as Unoise
 from mjlab.viewer import ViewerConfig
 
 from ex_grmt import mdp
+from ex_grmt.assets import get_ex_grmt_g1_robot_cfg
 from ex_grmt.mdp.actions import ReferenceResidualJointPositionActionCfg
 from ex_grmt.mdp.commands import MultiMotionCommandCfg
 
@@ -65,6 +66,12 @@ END_EFFECTORS: tuple[str, ...] = (
 
 FOOT_BODIES: tuple[str, ...] = ("left_ankle_roll_link", "right_ankle_roll_link")
 FOOT_GEOM_REGEX = r"^(left|right)_foot[1-7]_collision$"
+HAND_GEOM_REGEX = r"^(left|right)_hand_collision$"
+"""Wrist-mounted hand capsules (on ``*_wrist_yaw_link``). Exempt from the
+undesired-contact penalty: Table I never defines which bodies are "undesired", and
+InstinctLab's BeyondMimic shadowing excludes exactly ankles + wrists -- get-ups,
+rolls and hand-support motions legitimately put the wrists on the floor, and
+penalizing that fights the tracking terms head-on. Elbows/knees stay penalized."""
 
 POLICY_HZ = 50.0
 """Control rate (paper Sec. VI-C). Must match the motion clips' fps."""
@@ -98,22 +105,63 @@ COMMAND_WINDOW_RADIUS = 10
 _COMMAND_TOKEN_NOISE: tuple[float, ...] = (
   (0.5,) * 3 + (0.52,) * 3 + (0.05,) * 3 + (0.1,) * 29
 )
-COMMAND_WINDOW_NOISE: tuple[float, ...] = (
-  _COMMAND_TOKEN_NOISE * (2 * COMMAND_WINDOW_RADIUS + 1)
-)
 
-# Table II command perturbations, reused as reference-state-initialisation noise.
+
+def command_window_noise(heading_closed_loop: bool = False) -> tuple[float, ...]:
+  """Per-channel command-window noise for the 38D or heading-aware 44D token.
+
+  The first 38 magnitudes are the unchanged Extreme-RGMT Table-II values. The
+  opt-in six-dimensional relative orientation follows SONIC's 0.05 magnitude.
+  """
+  token = _COMMAND_TOKEN_NOISE + ((0.05,) * 6 if heading_closed_loop else ())
+  return token * (2 * COMMAND_WINDOW_RADIUS + 1)
+
+
+# Public legacy constant: keep the faithful default exactly 21 x 38 channels.
+COMMAND_WINDOW_NOISE: tuple[float, ...] = command_window_noise()
+
+# Push / reference-state-initialisation velocity noise. Table II specifies only the
+# push *interval*; the magnitudes below follow InstinctLab's BeyondMimic shadowing
+# (identical to its push and RSI ranges). x/y/roll/pitch coincide with Table II's
+# command perturbations; z and yaw have no paper value.
 VELOCITY_RANGE = {
   "x": (-0.5, 0.5),
   "y": (-0.5, 0.5),
   "z": (-0.2, 0.2),
   "roll": (-0.52, 0.52),
   "pitch": (-0.52, 0.52),
-  "yaw": (-0.52, 0.52),
+  "yaw": (-0.78, 0.78),
 }
 
+# Fall recovery -- RGMT (arXiv:2601.23080v1) Sec. II-D. Extreme-RGMT builds on RGMT's
+# controller/training design and demonstrates landing recovery on hardware, but never
+# restates the mechanism. Recovery poses are generated at runtime and do not require
+# fall/get-up demonstrations or a separate motion corpus.
+RECOVERY_PROBABILITY = 0.15
+"""A resetting env becomes a recovery env with this probability (RGMT Sec. II-D)."""
+RECOVERY_WINDOW_S = 3.0
+"""Instability terminations are suspended for this long (RGMT Sec. II-D)."""
+RECOVERY_ASSIST_FORCE_N = (0.0, 200.0)
+"""Upward assistance-force magnitude range, newtons (RGMT Sec. II-D)."""
+RECOVERY_ASSIST_ANNEAL_STEPS = 2_400_000
+"""Linear anneal horizon in env steps (= 100k iterations x 24 rollout steps). RGMT
+gives no number ("annealed over training iterations"), so this tracks the Stage-I run
+length in ``rl_cfgs.stage1_runner_cfg``; change both together. See
+MultiMotionCommandCfg.
 
-def _proprio_terms() -> dict[str, ObservationTermCfg]:
+Counted from the first step taken *with recovery enabled*, not from the start of
+training history -- ``MultiMotionCommand.recovery_steps_elapsed``."""
+RECOVERY_ROOT_HEIGHT_M = (0.35, 0.65)
+"""ASSUMPTION: randomized recovery-pose pelvis height; RGMT gives no distribution."""
+RECOVERY_ROOT_TILT_RAD = (math.pi / 3.0, 2.0 * math.pi / 3.0)
+"""ASSUMPTION: non-upright tilt range around a random horizontal axis."""
+RECOVERY_JOINT_JITTER_RAD = (-0.25, 0.25)
+"""ASSUMPTION: per-joint jitter around the ordinary reference, clipped to limits."""
+
+
+def _proprio_terms(
+  acquisition_fraction: float | None, noise_enabled: bool
+) -> dict[str, ObservationTermCfg]:
   """``o^prop = [g_proj(3), omega(3), q - q0(29), qdot(29)]`` -- 64 dims (Eq. 1).
 
   ORDER IS LOAD-BEARING: ``ExGRMTActorCfg.proprio_term_dims`` must match it, because
@@ -122,29 +170,54 @@ def _proprio_terms() -> dict[str, ObservationTermCfg]:
   """
   return {
     "projected_gravity": ObservationTermCfg(
-      func=mdp.projected_gravity,
-      noise=Unoise(n_min=-0.05, n_max=0.05),
+      func=mdp.role_noisy_projected_gravity,
+      params={
+        "acquisition_fraction": acquisition_fraction,
+        "magnitude": 0.05,
+        "enabled": noise_enabled,
+      },
     ),
     "base_ang_vel": ObservationTermCfg(
-      func=mdp.builtin_sensor,
-      params={"sensor_name": "robot/imu_ang_vel"},
-      noise=Unoise(n_min=-0.2, n_max=0.2),
+      func=mdp.role_noisy_builtin_sensor,
+      params={
+        "sensor_name": "robot/imu_ang_vel",
+        "acquisition_fraction": acquisition_fraction,
+        "magnitude": 0.2,
+        "enabled": noise_enabled,
+      },
     ),
     "joint_pos": ObservationTermCfg(
-      func=mdp.joint_pos_rel,
-      params={"biased": True},
-      noise=Unoise(n_min=-0.01, n_max=0.01),
+      func=mdp.role_noisy_joint_pos_rel,
+      params={
+        "biased": True,
+        "acquisition_fraction": acquisition_fraction,
+        "magnitude": 0.01,
+        "enabled": noise_enabled,
+      },
     ),
     "joint_vel": ObservationTermCfg(
-      func=mdp.joint_vel_rel,
-      noise=Unoise(n_min=-0.5, n_max=0.5),
+      func=mdp.role_noisy_joint_vel_rel,
+      params={
+        "acquisition_fraction": acquisition_fraction,
+        "magnitude": 0.5,
+        "enabled": noise_enabled,
+      },
     ),
   }
 
 
 def _critic_terms() -> dict[str, ObservationTermCfg]:
-  """Privileged critic observations (paper Sec. III-B), noise-free."""
-  terms: dict[str, ObservationTermCfg] = {
+  """Critic input ``s_t = [o_t, g_t, o_t^priv]`` (RGMT Eq. 3-4), noise-free.
+
+  RGMT Eq. 1 includes the previous action inside ``o_t``; ``g_t`` is the *single*
+  current reference token (Eq. 2), not the actor's 21-token window; the privileged
+  block is exactly ``[h_t^ref, x_t^link, v_t]``. Extreme-RGMT Sec. III-B repeats the
+  same categories. An earlier revision additionally fed the critic the full command
+  window plus reference joint targets -- more information than the paper's critic,
+  which shifts value estimates and hence GAE/STAR advantage statistics.
+  """
+  return {
+    # o_t (noise-free): [g_proj, omega, q - q0, qdot, a_{t-1}] (RGMT Eq. 1).
     "projected_gravity": ObservationTermCfg(func=mdp.projected_gravity),
     "base_ang_vel": ObservationTermCfg(
       func=mdp.builtin_sensor, params={"sensor_name": "robot/imu_ang_vel"}
@@ -152,18 +225,13 @@ def _critic_terms() -> dict[str, ObservationTermCfg]:
     "joint_pos": ObservationTermCfg(func=mdp.joint_pos_rel),
     "joint_vel": ObservationTermCfg(func=mdp.joint_vel_rel),
     "actions": ObservationTermCfg(func=mdp.last_action),
-    # Privileged from here on: not available on the real robot.
-    "base_lin_vel": ObservationTermCfg(
-      func=mdp.builtin_sensor, params={"sensor_name": "robot/imu_lin_vel"}
+    # g_t: current reference token [v_ref, w_ref, g_ref, q_ref] (RGMT Eq. 2).
+    "command_token": ObservationTermCfg(
+      func=mdp.motion_command_token, params={"command_name": "motion"}
     ),
+    # o_t^priv = [h_t^ref, x_t^link, v_t] (RGMT Eq. 3): not available on-robot.
     "ref_root_height": ObservationTermCfg(
       func=mdp.motion_ref_root_height, params={"command_name": "motion"}
-    ),
-    "motion_anchor_pos_b": ObservationTermCfg(
-      func=mdp.motion_anchor_pos_b, params={"command_name": "motion"}
-    ),
-    "motion_anchor_ori_b": ObservationTermCfg(
-      func=mdp.motion_anchor_ori_b, params={"command_name": "motion"}
     ),
     "body_pos": ObservationTermCfg(
       func=mdp.robot_body_pos_b, params={"command_name": "motion"}
@@ -171,14 +239,10 @@ def _critic_terms() -> dict[str, ObservationTermCfg]:
     "body_ori": ObservationTermCfg(
       func=mdp.robot_body_ori_b, params={"command_name": "motion"}
     ),
-    "command": ObservationTermCfg(
-      func=mdp.generated_commands, params={"command_name": "motion"}
-    ),
-    "command_window": ObservationTermCfg(
-      func=mdp.motion_command_window, params={"command_name": "motion"}
+    "base_lin_vel": ObservationTermCfg(
+      func=mdp.builtin_sensor, params={"sensor_name": "robot/imu_lin_vel"}
     ),
   }
-  return terms
 
 
 def make_ex_grmt_env_cfg(
@@ -188,16 +252,37 @@ def make_ex_grmt_env_cfg(
   acquisition_fraction: float | None = None,
   play: bool = False,
   sim_hz: float = DEFAULT_SIM_HZ,
+  experimental_rsi: bool = False,
+  heading_closed_loop: bool = False,
+  recovery_probability: float = 0.0,
+  require_v1_stratification: bool = False,
+  stratification_mastered_manifest: str | None = None,
+  stratification_challenging_manifest: str | None = None,
 ) -> ManagerBasedRlEnvCfg:
   """Build the Extreme-RGMT tracking environment.
 
   Args:
-    manifest: Clip manifest from ``ex_grmt.scripts.prepare_motions``.
+    manifest: Complete-sequence Stage-I manifest or post-Stage-I logical-clip manifest.
     acquisition_clips: Challenging set ``D_c``. None = the whole library (Stage I).
     consolidation_clips: Mastered set ``D_m``. Required for Stage II.
     acquisition_fraction: ``xi``. None disables the PACE split (Stage I).
     play: Deterministic replay mode (no corruption, no pushes, no RSI noise).
     sim_hz: Physics rate (= simulated PD rate). See :data:`DEFAULT_SIM_HZ`.
+    experimental_rsi: Enable the pose/velocity/joint reset jitter inherited from
+      mjlab. It is not part of Extreme-RGMT's published perturbation protocol and is
+      disabled in the faithful configuration.
+    heading_closed_loop: Append SONIC-style relative root orientation to each command
+      token. Training resets receive yaw-only jitter of +/-0.2 rad so the feedback is
+      exercised; play remains deterministic. False preserves the 38D baseline.
+    recovery_probability: Opt-in RGMT recovery mechanism. The randomized-pose
+      distribution and anneal horizon are explicit local assumptions because RGMT
+      does not publish those parameters.
+    require_v1_stratification: Validate Stage-II manifests against the v1
+      10-second/5-rollout/80-percent protocol when the command is constructed.
+    stratification_mastered_manifest: Authenticated D_m manifest used for strict
+      validation independently of which subset this task samples.
+    stratification_challenging_manifest: Authenticated D_c manifest used for strict
+      validation independently of which subset this task samples.
   """
   if abs(sim_hz / POLICY_HZ - round(sim_hz / POLICY_HZ)) > 1e-9:
     raise ValueError(
@@ -210,9 +295,11 @@ def make_ex_grmt_env_cfg(
 
   observations = {
     "proprio_hist": ObservationGroupCfg(
-      terms=_proprio_terms(),
+      terms=_proprio_terms(acquisition_fraction, noise_enabled=not play),
       concatenate_terms=True,
-      enable_corruption=True,
+      # Noise is applied inside role-aware observation terms, because mjlab's group
+      # corruption has no environment-role mask.
+      enable_corruption=False,
       # Flattened per term -> [g(H*3), omega(H*3), q(H*29), qdot(H*29)].
       history_length=HISTORY_LENGTH,
       flatten_history_dim=True,
@@ -227,17 +314,17 @@ def make_ex_grmt_env_cfg(
     "command_window": ObservationGroupCfg(
       terms={
         "window": ObservationTermCfg(
-          func=mdp.motion_command_window,
-          params={"command_name": "motion"},
-          # Table II command perturbations, per channel (see COMMAND_WINDOW_NOISE).
-          noise=Unoise(
-            n_min=tuple(-x for x in COMMAND_WINDOW_NOISE),
-            n_max=COMMAND_WINDOW_NOISE,
-          ),
+          func=mdp.role_noisy_motion_command_window,
+          params={
+            "command_name": "motion",
+            "acquisition_fraction": acquisition_fraction,
+            "magnitude": command_window_noise(heading_closed_loop),
+            "enabled": not play,
+          },
         )
       },
       concatenate_terms=True,
-      enable_corruption=True,
+      enable_corruption=False,
     ),
     "critic": ObservationGroupCfg(
       terms=_critic_terms(),
@@ -271,6 +358,12 @@ def make_ex_grmt_env_cfg(
       # per-joint scale (0.25 * effort_limit / stiffness) so the policy's unit-ish
       # Gaussian output maps to a sensible joint range; Table III lists no action
       # scale, so the paper must apply an equivalent normalization implicitly.
+      #
+      # Deliberately mjlab's frozen dict, NOT a value derived from our own effort
+      # limits. `hip_pitch_effort_limit()` can raise the hip-pitch torque clamp, and
+      # since `kp * scale == 0.25 * effort`, re-deriving the scale would also change
+      # what a unit of policy output means -- silently reinterpreting every trained
+      # checkpoint. The scale stays pinned; the override moves the clamp only.
       scale=G1_ACTION_SCALE,
       command_name="motion",
     )
@@ -292,18 +385,42 @@ def make_ex_grmt_env_cfg(
       acquisition_clips=acquisition_clips,
       consolidation_clips=consolidation_clips,
       acquisition_fraction=acquisition_fraction,
+      require_v1_stratification=require_v1_stratification,
+      stratification_mastered_manifest=(
+        stratification_mastered_manifest or consolidation_clips
+      ),
+      stratification_challenging_manifest=(
+        stratification_challenging_manifest or acquisition_clips
+      ),
       command_window_radius=COMMAND_WINDOW_RADIUS,
-      pose_range={
-        "x": (-0.05, 0.05),
-        "y": (-0.05, 0.05),
-        "z": (-0.01, 0.01),
-        "roll": (-0.1, 0.1),
-        "pitch": (-0.1, 0.1),
-        "yaw": (-0.2, 0.2),
-      },
-      velocity_range=VELOCITY_RANGE,
-      joint_position_range=(-0.1, 0.1),  # Table II: joint pose +-0.1 rad.
+      heading_closed_loop=heading_closed_loop,
+      # These affect the simulated initial state, not the command observation.  The
+      # paper's +/-0.1 rad entry belongs to command perturbation, already applied
+      # above, so RSI stays off unless an explicit ablation requests it.
+      pose_range=(
+        {
+          "x": (-0.05, 0.05),
+          "y": (-0.05, 0.05),
+          "z": (-0.01, 0.01),
+          "roll": (-0.1, 0.1),
+          "pitch": (-0.1, 0.1),
+          "yaw": (-0.2, 0.2),
+        }
+        if experimental_rsi
+        else ({"yaw": (-0.2, 0.2)} if heading_closed_loop and not play else {})
+      ),
+      velocity_range=VELOCITY_RANGE if experimental_rsi else {},
+      joint_position_range=(-0.1, 0.1) if experimental_rsi else (0.0, 0.0),
       sampling_mode="adaptive",
+      # Recovery comes from RGMT rather than a fully specified Extreme-RGMT-v1
+      # protocol. Explicit recovery tasks opt in with RECOVERY_PROBABILITY.
+      recovery_probability=recovery_probability,
+      recovery_window_s=RECOVERY_WINDOW_S,
+      recovery_assist_force_range=RECOVERY_ASSIST_FORCE_N,
+      recovery_assist_anneal_steps=RECOVERY_ASSIST_ANNEAL_STEPS,
+      recovery_root_height_range=RECOVERY_ROOT_HEIGHT_M,
+      recovery_root_tilt_range=RECOVERY_ROOT_TILT_RAD,
+      recovery_joint_position_jitter=RECOVERY_JOINT_JITTER_RAD,
     )
   }
 
@@ -313,16 +430,45 @@ def make_ex_grmt_env_cfg(
 
   events: dict[str, EventTermCfg] = {
     "push_robot": EventTermCfg(
-      func=mdp.push_by_setting_velocity,
+      func=mdp.role_push_by_setting_velocity,
       mode="interval",
       interval_range_s=(1.0, 3.0),  # external push interval [1, 3] s
-      params={"velocity_range": VELOCITY_RANGE},
+      params={
+        "acquisition_fraction": acquisition_fraction,
+        "velocity_range": VELOCITY_RANGE,
+        "asset_cfg": SceneEntityCfg("robot"),
+      },
+    ),
+    # RGMT Sec. II-D upward assistance for recovery environments. Step mode: the
+    # wrench must be rewritten (and zeroed) every step because xfrc_applied persists
+    # across resets.
+    "recovery_assist": EventTermCfg(
+      func=mdp.recovery_assist_force,
+      mode="step",
+      params={"command_name": "motion", "asset_cfg": SceneEntityCfg("robot")},
+    ),
+    # MuJoCo takes max(friction_terrain, friction_robot) for equal-priority contacts.
+    # Pinning the acquisition plane to Table II's lower bound makes the shared
+    # per-environment robot draw below effective instead of clipping every sample
+    # below 1.0. Consolidation keeps the nominal plane coefficient of 1.0.
+    "terrain_friction_floor": EventTermCfg(
+      mode="startup",
+      func=mdp.role_geom_friction,
+      params={
+        "acquisition_fraction": acquisition_fraction,
+        "asset_cfg": SceneEntityCfg("terrain", geom_names=("terrain",)),
+        "operation": "abs",
+        "ranges": (0.10, 0.10),
+        "shared_random": True,
+      },
     ),
     "ground_friction": EventTermCfg(
       mode="startup",
-      func=dr.geom_friction,
+      func=mdp.role_geom_friction,
       params={
-        "asset_cfg": SceneEntityCfg("robot", geom_names=FOOT_GEOM_REGEX),
+        "acquisition_fraction": acquisition_fraction,
+        # Whole-body motions contact the ground with hands, knees and torso too.
+        "asset_cfg": SceneEntityCfg("robot", geom_names=r".*_collision\d*$"),
         "operation": "abs",
         "ranges": (0.10, 1.75),
         "shared_random": True,
@@ -330,8 +476,9 @@ def make_ex_grmt_env_cfg(
     ),
     "base_mass": EventTermCfg(
       mode="startup",
-      func=dr.body_mass,
+      func=mdp.role_body_mass,
       params={
+        "acquisition_fraction": acquisition_fraction,
         "asset_cfg": SceneEntityCfg("robot", body_names=(ANCHOR_BODY,)),
         "operation": "add",
         "ranges": (-3.0, 6.0),  # added base mass [-3, 6] kg
@@ -339,8 +486,9 @@ def make_ex_grmt_env_cfg(
     ),
     "base_com": EventTermCfg(
       mode="startup",
-      func=dr.body_com_offset,
+      func=mdp.role_body_com_offset,
       params={
+        "acquisition_fraction": acquisition_fraction,
         "asset_cfg": SceneEntityCfg("robot", body_names=(ANCHOR_BODY,)),
         "operation": "add",
         "ranges": {
@@ -352,8 +500,9 @@ def make_ex_grmt_env_cfg(
     ),
     "motor_strength": EventTermCfg(
       mode="startup",
-      func=dr.effort_limits,
+      func=mdp.role_effort_limits,
       params={
+        "acquisition_fraction": acquisition_fraction,
         "asset_cfg": SceneEntityCfg("robot"),
         "operation": "scale",
         "effort_limit_range": (0.8, 1.2),
@@ -361,8 +510,9 @@ def make_ex_grmt_env_cfg(
     ),
     "pd_gains": EventTermCfg(
       mode="startup",
-      func=dr.pd_gains,
+      func=mdp.role_pd_gains,
       params={
+        "acquisition_fraction": acquisition_fraction,
         "asset_cfg": SceneEntityCfg("robot"),
         "operation": "scale",
         "kp_range": (0.8, 1.2),
@@ -371,22 +521,29 @@ def make_ex_grmt_env_cfg(
     ),
     "encoder_bias": EventTermCfg(
       mode="startup",
-      func=dr.encoder_bias,
+      func=mdp.role_encoder_bias,
       params={
+        "acquisition_fraction": acquisition_fraction,
         "asset_cfg": SceneEntityCfg("robot"),
         "bias_range": (-0.01, 0.01),  # motor zero offset [-0.01, 0.01] rad
       },
     ),
     "joint_armature": EventTermCfg(
       mode="startup",
-      func=dr.joint_armature,
+      func=mdp.role_joint_armature,
       params={
+        "acquisition_fraction": acquisition_fraction,
         "asset_cfg": SceneEntityCfg("robot"),
         "operation": "scale",
         "ranges": (1.0, 1.05),
       },
     ),
   }
+
+  if recovery_probability <= 0.0:
+    # Do not execute an unpublished assistance event on the strict-v1 path. The
+    # recovery-aware termination wrappers are no-ops when no episode is marked.
+    events.pop("recovery_assist")
 
   ##
   # Rewards -- paper Table I.
@@ -451,13 +608,28 @@ def make_ex_grmt_env_cfg(
   ##
 
   terminations: dict[str, TerminationTermCfg] = {
+    # The threshold-based tracking checks below cannot detect NaN because every
+    # comparison with NaN is false.  Reset a corrupt MuJoCo world before its state is
+    # sensed and appended to proprio_hist.
+    "nonfinite_physics_state": TerminationTermCfg(func=mdp.nonfinite_physics_state),
     "time_out": TerminationTermCfg(func=mdp.time_out, time_out=True),
+    "motion_sequence_end": TerminationTermCfg(
+      func=mdp.motion_sequence_end,
+      time_out=True,
+      params={"command_name": "motion"},
+    ),
+    # RGMT Sec. II-D's three instability conditions -- "excessive base orientation
+    # deviation, insufficient base height, and abnormally low height of key body
+    # links" -- as symmetric reference deviations, identical to mjlab's BeyondMimic
+    # port, which both papers state they follow. All three wear the recovery shield:
+    # suspended for a recovery environment's first RECOVERY_WINDOW_S seconds,
+    # unchanged everywhere else.
     "anchor_pos": TerminationTermCfg(
-      func=mdp.bad_anchor_pos_z_only,
+      func=mdp.bad_anchor_pos_z_only_outside_recovery,
       params={"command_name": "motion", "threshold": 0.25},
     ),
     "anchor_ori": TerminationTermCfg(
-      func=mdp.bad_anchor_ori,
+      func=mdp.bad_anchor_ori_outside_recovery,
       params={
         "asset_cfg": SceneEntityCfg("robot"),
         "command_name": "motion",
@@ -465,7 +637,7 @@ def make_ex_grmt_env_cfg(
       },
     ),
     "ee_body_pos": TerminationTermCfg(
-      func=mdp.bad_motion_body_pos_z_only,
+      func=mdp.bad_motion_body_pos_z_only_outside_recovery,
       params={
         "command_name": "motion",
         "threshold": 0.25,
@@ -505,7 +677,8 @@ def make_ex_grmt_env_cfg(
       mode="geom",
       entity="robot",
       pattern=r".*_collision\d*$",
-      exclude=(FOOT_GEOM_REGEX,),
+      # Feet and wrists may touch the ground unpenalized (see HAND_GEOM_REGEX).
+      exclude=(FOOT_GEOM_REGEX, HAND_GEOM_REGEX),
     ),
     secondary=ContactMatch(mode="body", pattern="terrain"),
     fields=("found",),
@@ -516,9 +689,12 @@ def make_ex_grmt_env_cfg(
   cfg = ManagerBasedRlEnvCfg(
     scene=SceneCfg(
       terrain=TerrainEntityCfg(terrain_type="plane"),
-      entities={"robot": get_g1_robot_cfg()},
+      entities={"robot": get_ex_grmt_g1_robot_cfg()},
       sensors=(self_collision, feet_ground, nonfoot_ground),
-      num_envs=1,
+      # Per-GPU environment count -- mjlab's distributed launcher gives every rank
+      # this many, so 4 GPUs is 4096 total (BeyondMimic/SONIC both train at 4096).
+      # Training jobs no longer pass --env.scene.num-envs; play/tests override it.
+      num_envs=1024,
     ),
     observations=observations,
     actions=actions,
@@ -537,27 +713,40 @@ def make_ex_grmt_env_cfg(
     ),
     sim=SimulationCfg(
       nconmax=35,
-      njmax=250,
+      # The InstinctMJ whole-body collision profile can create substantially more
+      # constraint rows than mjlab's stock G1, especially during randomized
+      # recovery resets.  The stock njmax=250 overflowed in long cluster runs and
+      # the truncated solve subsequently produced NaN proprioception.  Observed
+      # peaks were 418 rows, so keep headroom for unseen contact configurations.
+      njmax=512,
+      # Three contact sensors may match the same dense fallen-body contact set.
+      # MuJoCo Warp reported peaks of 74 with its default allocation of 64.
+      contact_sensor_maxmatch=128,
       mujoco=MujocoCfg(timestep=1.0 / sim_hz, iterations=10, ls_iterations=20),
     ),
     # 50 Hz policy (paper Sec. VI-C) over a 200 Hz sim. Derived so the two can never
     # drift apart: the policy rate must equal the motion clips' fps, or the reference
     # advances at a different rate than the controller.
     decimation=int(round(sim_hz / POLICY_HZ)),
-    # Must be >= the longest clip (prepare_motions caps clips at 10 s), otherwise a
-    # clip can never be tracked to completion and stratification scores it as failed.
+    # Training rollout horizon. Stage I may load longer complete sequences: adaptive
+    # sampling initializes throughout all of their temporal bins, so this does not
+    # truncate the stored data. Evaluation disables the timer in scripts/_harness.py.
     episode_length_s=10.0,
   )
 
   if play:
+    cfg.scene.num_envs = 1
     cfg.episode_length_s = int(1e9)
-    for group in ("proprio_hist", "command_window"):
-      cfg.observations[group].enable_corruption = False
-    cfg.events.pop("push_robot", None)
+    # Nominal evaluation means nominal dynamics as well as clean observations.
+    for event in tuple(cfg.events):
+      if event != "recovery_assist":
+        cfg.events.pop(event)
     motion_cmd = cfg.commands["motion"]
     assert isinstance(motion_cmd, MultiMotionCommandCfg)
     motion_cmd.pose_range = {}
     motion_cmd.velocity_range = {}
+    motion_cmd.joint_position_range = (0.0, 0.0)
     motion_cmd.sampling_mode = "start"
+    motion_cmd.recovery_probability = 0.0
 
   return cfg
