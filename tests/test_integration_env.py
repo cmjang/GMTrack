@@ -19,7 +19,10 @@ import torch
 
 pytest.importorskip("mjlab")
 
-_MANIFEST = Path("data/manifests/all.json")
+_MANIFEST = Path(
+  "data/current/"
+  "stage1_paper_mix_final_backflip_cartwheel_balanced_grounded_no_fall_getup.json"
+)
 
 pytestmark = [
   pytest.mark.skipif(not torch.cuda.is_available(), reason="needs CUDA"),
@@ -40,7 +43,9 @@ def env():
   cfg = load_env_cfg("ExGRMT-Stage1-Flat-Unitree-G1")
   cfg.scene.num_envs = 4
   # Noise off so history frames can be compared exactly.
-  cfg.observations["proprio_hist"].enable_corruption = False
+  for term in cfg.observations["proprio_hist"].terms.values():
+    if "enabled" in term.params:
+      term.params["enabled"] = False
   e = ManagerBasedRlEnv(cfg=cfg, device="cuda:0")
   yield e
   e.close()
@@ -51,6 +56,32 @@ def _zero_step(env):
     env.num_envs, env.action_manager.total_action_dim, device=env.device
   )
   return env.step(action)
+
+
+def test_table_ii_ground_friction_range_is_physically_effective(env):
+  """The terrain floor must not clamp low robot-friction samples via MuJoCo max."""
+  import re
+
+  terrain = env.scene["terrain"]
+  terrain_ids = terrain.indexing.geom_ids.long()
+  terrain_mu = env.sim.model.geom_friction[:, terrain_ids, 0]
+  assert torch.allclose(terrain_mu, torch.full_like(terrain_mu, 0.10))
+
+  collision_ids = torch.tensor(
+    [
+      geom_id
+      for geom_id in range(env.sim.mj_model.ngeom)
+      if re.match(r".*_collision\d*$", env.sim.mj_model.geom(geom_id).name)
+    ],
+    device=env.device,
+  )
+  robot_mu = env.sim.model.geom_friction[:, collision_ids, 0]
+  assert bool((robot_mu >= 0.10).all() and (robot_mu <= 1.75).all())
+  # shared_random=True gives one coefficient to every robot collision geom in an env.
+  torch.testing.assert_close(robot_mu, robot_mu[:, :1].expand_as(robot_mu))
+  # MuJoCo's equal-priority contact rule is max(mu_plane, mu_robot), hence the
+  # effective coefficient is exactly the sampled robot value over the full range.
+  torch.testing.assert_close(torch.maximum(robot_mu, terrain_mu), robot_mu)
 
 
 def test_proprio_history_is_time_ascending_with_newest_last(env):

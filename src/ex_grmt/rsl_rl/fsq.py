@@ -8,15 +8,19 @@ reference trajectory -- exactly the failure mode of Xsens inertial capture, whic
 noisy in root drift, local pose and contact timing.
 
 ASSUMPTION: the paper states the token layout (2 x 32) but not the number of
-quantization levels per dimension. We default to 5, the mid-point of the range
-Mentzer et al. recommend for small per-dimension level counts. It is a config knob
-(``fsq_levels``) so the choice can be swept.
+quantization levels per dimension. Following the SONIC training release under
+``cankao/GR00T-WholeBodyControl``, whose universal tokenizer uses the same 2 x 32
+layout, we use 32 levels per dimension as the unpublished-detail proxy. It remains a
+config knob (``fsq_levels``) and is not claimed as an Ex-GRMT paper value.
 """
 
 from __future__ import annotations
 
 import torch
 from torch import nn
+
+SONIC_PROXY_FSQ_LEVELS = 32
+"""Per-dimension levels used by SONIC's published 2 x 32 universal tokenizer."""
 
 
 def round_ste(x: torch.Tensor) -> torch.Tensor:
@@ -33,8 +37,8 @@ class FSQ(nn.Module):
     token_dim: Width of one token. The paper uses 32, giving 2 tokens over a
       64-d feature. Only affects bookkeeping/diagnostics -- quantization itself is
       element-wise, so the grouping does not change the forward pass.
-    eps: Shrinks the ``tanh`` range slightly so the extreme levels stay reachable
-      without saturating the gradient.
+    eps: Expands the pre-rounding range slightly so both extreme integer codes stay
+      reachable, matching SONIC's ``vector-quantize-pytorch`` implementation.
 
   Shape:
     - input: ``(..., dim)``
@@ -42,7 +46,11 @@ class FSQ(nn.Module):
   """
 
   def __init__(
-    self, dim: int, levels: int = 5, token_dim: int = 32, eps: float = 1e-3
+    self,
+    dim: int,
+    levels: int = SONIC_PROXY_FSQ_LEVELS,
+    token_dim: int = 32,
+    eps: float = 1e-3,
   ) -> None:
     super().__init__()
     if levels < 2:
@@ -55,13 +63,15 @@ class FSQ(nn.Module):
     self.token_dim = token_dim
     self.num_tokens = dim // token_dim if token_dim > 0 else 1
 
-    half_l = (levels - 1) * (1.0 - eps) / 2.0
-    # Even level counts need a half-step shift so the grid stays symmetric.
+    # Match the vector-quantize-pytorch FSQ used by SONIC's training release.
+    half_l = (levels - 1) * (1.0 + eps) / 2.0
+    # Even level counts use FSQ's half-step offset; the inverse-tanh shift keeps a
+    # zero input exactly on the zero code before rounding.
     offset = 0.5 if levels % 2 == 0 else 0.0
     self.register_buffer("_half_l", torch.tensor(half_l), persistent=False)
     self.register_buffer("_offset", torch.tensor(offset), persistent=False)
     self.register_buffer(
-      "_shift", torch.atan(torch.tensor(offset / half_l)), persistent=False
+      "_shift", torch.atanh(torch.tensor(offset / half_l)), persistent=False
     )
     self.register_buffer(
       "_half_width", torch.tensor(float(levels // 2)), persistent=False
@@ -79,8 +89,8 @@ class FSQ(nn.Module):
   def code_indices(self, z: torch.Tensor) -> torch.Tensor:
     """Per-dimension integer codes in ``[0, levels)``, for diagnostics.
 
-    A global codebook index is deliberately not returned: with 32 dims at 5 levels
-    the per-token codebook is 5**32, which overflows int64.
+    A global codebook index is deliberately not returned: with 32 dimensions per
+    token, the implicit product codebook far exceeds int64 for the SONIC proxy.
     """
     quantized = torch.round(self.bound(z))
     return (quantized + self._half_width).long().clamp_(0, self.levels - 1)
@@ -104,6 +114,5 @@ class FSQ(nn.Module):
 
   def extra_repr(self) -> str:
     return (
-      f"dim={self.dim}, levels={self.levels}, "
-      f"tokens={self.num_tokens}x{self.token_dim}"
+      f"dim={self.dim}, levels={self.levels}, tokens={self.num_tokens}x{self.token_dim}"
     )

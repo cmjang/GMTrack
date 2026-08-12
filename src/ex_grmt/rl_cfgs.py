@@ -64,14 +64,19 @@ def _critic() -> RslRlModelCfg:
   )
 
 
-def stage1_runner_cfg() -> ExGRMTRunnerCfg:
+def stage1_runner_cfg(
+  *, heading_closed_loop: bool = False, experiment_name: str | None = None
+) -> ExGRMTRunnerCfg:
   """Stage I: generalist base policy ``pi_base`` over the full motion distribution.
 
   No PACE split and no STAR -- Stage I is plain PPO with adaptive bin sampling
   (Sec. IV), so ``PacePPO`` degrades to upstream ``PPO`` behaviour here.
+
+  Args:
+    heading_closed_loop: Append the 6D root-orientation error to every command token.
   """
   return ExGRMTRunnerCfg(
-    actor=_actor(),
+    actor=_actor(command_token_dim=44 if heading_closed_loop else 38),
     critic=_critic(),
     algorithm=PacePpoAlgorithmCfg(
       acquisition_fraction=None,
@@ -79,9 +84,18 @@ def stage1_runner_cfg() -> ExGRMTRunnerCfg:
       use_star=False,
       **_PPO,
     ),
-    experiment_name="ex_grmt_stage1",
+    experiment_name=(
+      experiment_name
+      if experiment_name is not None
+      else "ex_grmt_stage1_heading"
+      if heading_closed_loop
+      else "ex_grmt_stage1"
+    ),
     num_steps_per_env=24,
-    max_iterations=30_000,
+    # Paper gives no iteration count. BeyondMimic ships 30k and SONIC 100k; we take
+    # 100k -- 30k gets a plain tracker somewhere, but fall-recovery training needs
+    # considerably longer. RECOVERY_ASSIST_ANNEAL_STEPS is 100k x 24 to match.
+    max_iterations=100_000,
     save_interval=500,
     logger="tensorboard",
   )
@@ -92,7 +106,8 @@ def stage2_runner_cfg(
   use_star: bool = True,
   consolidation_enabled: bool = True,
   fixed_lambda_con: float | None = None,
-  experiment_name: str = "ex_grmt_stage2",
+  experiment_name: str | None = None,
+  heading_closed_loop: bool = False,
 ) -> ExGRMTRunnerCfg:
   """Stage II: PACE + STAR expansion toward highly dynamic skills.
 
@@ -102,9 +117,12 @@ def stage2_runner_cfg(
     use_star: False reproduces the "w/o STAR" ablation.
     consolidation_enabled: False reproduces the "w/o L_con" ablation.
     fixed_lambda_con: Set to 0.5 for the "Fixed lambda_con" ablation.
+    experiment_name: Optional explicit run family. When omitted, heading and
+      open-loop policies receive distinct default names.
+    heading_closed_loop: Append the 6D root-orientation error to every command token.
   """
   return ExGRMTRunnerCfg(
-    actor=_actor(),
+    actor=_actor(command_token_dim=44 if heading_closed_loop else 38),
     critic=_critic(),
     algorithm=PacePpoAlgorithmCfg(
       acquisition_fraction=ACQUISITION_FRACTION,
@@ -120,7 +138,13 @@ def stage2_runner_cfg(
       base_checkpoint=base_checkpoint,
       **_PPO,
     ),
-    experiment_name=experiment_name,
+    experiment_name=(
+      experiment_name
+      if experiment_name is not None
+      else "ex_grmt_stage2_heading"
+      if heading_closed_loop
+      else "ex_grmt_stage2"
+    ),
     num_steps_per_env=24,
     max_iterations=50_000,
     save_interval=500,

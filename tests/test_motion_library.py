@@ -143,6 +143,210 @@ def test_manifest_roundtrip(library, tmp_path):
   assert subset.total_frames == 320
 
 
+def test_manifest_ranges_slice_one_source_into_multiple_clips(tmp_path):
+  source = tmp_path / "full_sequence.npz"
+  _write_clip(source, 20, seed=123)
+  manifest = tmp_path / "ranges.json"
+  manifest.write_text(
+    json.dumps(
+      {
+        "clips": [
+          {
+            "name": "first",
+            "source": "test",
+            "path": source.name,
+            "frame_start": 2,
+            "num_frames": 5,
+            "fps": FPS,
+          },
+          {
+            "name": "second",
+            "source": "test",
+            "path": source.name,
+            "frame_start": 11,
+            "num_frames": 4,
+            "fps": FPS,
+          },
+        ]
+      }
+    )
+  )
+
+  lib = MotionLibrary.from_manifest(manifest, torch.tensor([1, 3]))
+  raw = np.load(source)
+
+  assert lib.clip_len.tolist() == [5, 4]
+  assert lib.clip_start.tolist() == [0, 5]
+  assert [info.frame_start for info in lib.clips] == [2, 11]
+  assert torch.equal(lib.joint_pos[:5], torch.as_tensor(raw["joint_pos"][2:7]))
+  assert torch.equal(lib.joint_pos[5:], torch.as_tensor(raw["joint_pos"][11:15]))
+  assert torch.equal(
+    lib.body_pos_w[:5], torch.as_tensor(raw["body_pos_w"][2:7][:, [1, 3]])
+  )
+  assert torch.equal(
+    lib.body_pos_w[5:], torch.as_tensor(raw["body_pos_w"][11:15][:, [1, 3]])
+  )
+
+
+def test_nonadjacent_manifest_paths_load_once_and_preserve_order(tmp_path, monkeypatch):
+  source_a = tmp_path / "sequence_a.npz"
+  source_b = tmp_path / "sequence_b.npz"
+  _write_clip(source_a, 20, seed=123)
+  _write_clip(source_b, 20, seed=456)
+  with np.load(source_a) as archive:
+    joint_a = archive["joint_pos"].copy()
+  with np.load(source_b) as archive:
+    joint_b = archive["joint_pos"].copy()
+
+  manifest = tmp_path / "ranges.json"
+  manifest.write_text(
+    json.dumps(
+      {
+        "clips": [
+          {
+            "name": "first",
+            "path": "sequence_a.npz",
+            "frame_start": 0,
+            "num_frames": 5,
+            "fps": FPS,
+          },
+          {
+            "name": "middle",
+            "path": "sequence_b.npz",
+            "frame_start": 3,
+            "num_frames": 4,
+            "fps": FPS,
+          },
+          {
+            "name": "last",
+            "path": "./sequence_a.npz",
+            "frame_start": 10,
+            "num_frames": 5,
+            "fps": FPS,
+          },
+        ]
+      }
+    )
+  )
+
+  real_load = np.load
+  load_calls = 0
+  key_reads: dict[str, int] = {}
+
+  class CountingArchive:
+    def __init__(self, path):
+      self.archive = real_load(path)
+
+    def __enter__(self):
+      return self
+
+    def __exit__(self, *_args):
+      self.archive.close()
+
+    def __contains__(self, key):
+      return key in self.archive
+
+    def __getitem__(self, key):
+      key_reads[key] = key_reads.get(key, 0) + 1
+      return self.archive[key]
+
+  def counted_load(path):
+    nonlocal load_calls
+    load_calls += 1
+    return CountingArchive(path)
+
+  monkeypatch.setattr(np, "load", counted_load)
+  monkeypatch.setattr(
+    torch,
+    "cat",
+    lambda *_args, **_kwargs: pytest.fail(
+      "manifest packing must copy directly into preallocated tensors"
+    ),
+  )
+  lib = MotionLibrary.from_manifest(manifest, torch.arange(NUM_BODIES))
+
+  assert load_calls == 2
+  assert key_reads == {
+    "joint_pos": 2,
+    "joint_vel": 2,
+    "body_pos_w": 2,
+    "body_quat_w": 2,
+    "body_lin_vel_w": 2,
+    "body_ang_vel_w": 2,
+  }
+  assert [info.name for info in lib.clips] == ["first", "middle", "last"]
+  assert lib.clip_start.tolist() == [0, 5, 9]
+  assert torch.equal(lib.joint_pos[:5], torch.as_tensor(joint_a[:5]))
+  assert torch.equal(lib.joint_pos[5:9], torch.as_tensor(joint_b[3:7]))
+  assert torch.equal(lib.joint_pos[9:], torch.as_tensor(joint_a[10:15]))
+
+
+@pytest.mark.parametrize(
+  ("frame_start", "num_frames", "message"),
+  [
+    (-1, 3, "frame_start must be non-negative"),
+    (8, 3, "exceeds the source length"),
+    (0, 0, "num_frames must be positive"),
+    (0, 1, "need at least 2"),
+  ],
+)
+def test_manifest_rejects_invalid_frame_ranges(
+  tmp_path, frame_start, num_frames, message
+):
+  source = tmp_path / "source.npz"
+  _write_clip(source, 10, seed=0)
+  manifest = tmp_path / "bad_range.json"
+  manifest.write_text(
+    json.dumps(
+      {
+        "clips": [
+          {
+            "name": "bad",
+            "path": source.name,
+            "frame_start": frame_start,
+            "num_frames": num_frames,
+            "fps": FPS,
+          }
+        ]
+      }
+    )
+  )
+
+  with pytest.raises(ValueError, match=message):
+    MotionLibrary.from_manifest(manifest, torch.arange(NUM_BODIES))
+
+
+@pytest.mark.parametrize("field", ["frame_start", "num_frames"])
+def test_manifest_rejects_non_integer_frame_range_values(tmp_path, field):
+  source = tmp_path / "source.npz"
+  _write_clip(source, 10, seed=0)
+  entry = {
+    "name": "bad",
+    "path": source.name,
+    "frame_start": 0,
+    "num_frames": 5,
+    "fps": FPS,
+  }
+  entry[field] = 1.5
+  manifest = tmp_path / "non_integer_range.json"
+  manifest.write_text(json.dumps({"clips": [entry]}))
+
+  with pytest.raises(TypeError, match=rf"{field} must be an integer"):
+    MotionLibrary.from_manifest(manifest, torch.arange(NUM_BODIES))
+
+
+def test_required_arrays_must_match_source_frame_count(tmp_path):
+  source = tmp_path / "mismatched.npz"
+  _write_clip(source, 10, seed=0)
+  with np.load(source) as stored:
+    arrays = {key: stored[key] for key in stored.files}
+  arrays["body_ang_vel_w"] = arrays["body_ang_vel_w"][:-1]
+  np.savez(source, **arrays)
+
+  with pytest.raises(ValueError, match=r"body_ang_vel_w.*9 frames.*joint_pos.*10"):
+    MotionLibrary([source], torch.arange(NUM_BODIES))
+
+
 ##
 # Adaptive bin sampler (Eq. 12-13)
 ##

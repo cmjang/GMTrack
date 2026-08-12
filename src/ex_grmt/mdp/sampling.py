@@ -18,6 +18,7 @@ baseline ``1/B``.
 from __future__ import annotations
 
 import math
+from typing import Any
 
 import torch
 
@@ -38,8 +39,12 @@ class AdaptiveBinSampler:
     kernel_lambda: Geometric decay of the smoothing kernel.
     uniform_ratio: ``eps_u`` in Eq. (13); mass reserved for the uniform baseline.
     alpha: EMA rate in Eq. (12).
-    max_count: ``c_max`` in Eq. (13); failure counts are clipped here before
-      normalisation so a single pathological bin cannot capture all sampling mass.
+    max_count_over_mean: ``K`` multiplier for the per-bin failure-count cap.
+      Following SONIC's public training release
+      (``adp_samp_failure_rate_max_over_mean``), the actual clip bound is
+      ``mean(active_failed_ema) * max_count_over_mean`` — a relative ceiling
+      that adapts as the failure distribution evolves, rather than a fixed
+      absolute number.  SONIC defaults to 50 (200 in its release configs).
     device: Torch device.
   """
 
@@ -53,7 +58,7 @@ class AdaptiveBinSampler:
     kernel_lambda: float = 0.8,
     uniform_ratio: float = 0.1,
     alpha: float = 0.001,
-    max_count: float = 1.0,
+    max_count_over_mean: float = 200.0,
     device: str = "cpu",
   ) -> None:
     self.device = device
@@ -67,7 +72,7 @@ class AdaptiveBinSampler:
       )
     self.uniform_ratio = uniform_ratio
     self.alpha = alpha
-    self.max_count = max_count
+    self.max_count_over_mean = max_count_over_mean
 
     bins = clip_bins.to(device)
     self.valid = torch.arange(self.max_bins, device=device)[None, :] < bins[:, None]
@@ -109,8 +114,17 @@ class AdaptiveBinSampler:
     that share depend on how many failures have accumulated: near-uniform early on,
     then progressively more peaked as the EMA grows -- an unintended implicit
     schedule on the exploration/exploitation balance.
+
+    Following SONIC's public training release, ``c_max`` is a **relative** ceiling:
+    ``mean(active_failed_ema) * max_count_over_mean``.  It adapts as the failure
+    distribution evolves, so a single pathological bin cannot capture all sampling
+    mass regardless of the absolute count scale.
     """
-    scores = torch.clamp(self.failed_ema, 0.0, self.max_count) * self.valid
+    active = self.failed_ema[self.valid]
+    bound = (
+      active.mean().item() * self.max_count_over_mean if active.numel() > 0 else 0.0
+    )
+    scores = torch.clamp(self.failed_ema, 0.0, bound) * self.valid
 
     total = scores.sum()
     if total > 0:
@@ -122,10 +136,8 @@ class AdaptiveBinSampler:
     scores = scores * self.valid
 
     if self.kernel_size > 1:
-      # NOT in the paper: inherited from mjlab, which convolves a small non-causal
-      # kernel over the bin axis to spread credit into neighbouring bins. Disabled by
-      # default (`adaptive_kernel_size=1`); kept because it is occasionally useful
-      # when bins are narrow relative to the failure horizon.
+      # NOT in the paper: an optional non-causal kernel spreads credit into
+      # neighbouring bins. The faithful default is size 1 (disabled).
       padded = torch.nn.functional.pad(
         scores.unsqueeze(1), (0, self.kernel_size - 1), mode="replicate"
       )
@@ -173,10 +185,146 @@ class AdaptiveBinSampler:
       0, flat, torch.ones_like(flat, dtype=self._pending.dtype)
     )
 
-  def step_ema(self) -> None:
-    """Apply Eq. (12) and clear the per-step accumulator."""
+  def synchronize_pending(self, process_group: Any | None = None) -> None:
+    """Sum locally recorded failures over all distributed workers in-place.
+
+    Each rank owns only its local environments, but Eq. (12) defines one failure
+    count over the full environment population.  Without this reduction, multi-GPU
+    training silently learns a different sampling distribution on every rank.
+
+    This is intentionally a no-op outside an initialized distributed process group,
+    which keeps single-process training and unit tests free of distributed setup.
+    Callers that deliberately maintain rank-local curricula can pass
+    ``synchronize_distributed=False`` to :meth:`step_ema`.
+    """
+    dist = torch.distributed
+    if not dist.is_available() or not dist.is_initialized():
+      return
+    if dist.get_world_size(group=process_group) <= 1:
+      return
+    dist.all_reduce(
+      self._pending,
+      op=dist.ReduceOp.SUM,
+      group=process_group,
+    )
+
+  def step_ema(
+    self,
+    *,
+    synchronize_distributed: bool = True,
+    process_group: Any | None = None,
+  ) -> None:
+    """Apply Eq. (12), optionally globally reducing failures, then clear them."""
+    if synchronize_distributed:
+      self.synchronize_pending(process_group)
     self.failed_ema.mul_(1.0 - self.alpha).add_(self._pending, alpha=self.alpha)
     self._pending.zero_()
+    self.refresh()
+
+  # -- checkpointing -------------------------------------------------------
+
+  def state_dict(self) -> dict[str, Any]:
+    """Return the mutable curriculum state plus topology needed for validation."""
+    return {
+      "version": 1,
+      "clip_ids": self.clip_ids.detach().clone(),
+      "max_bins": self.max_bins,
+      "valid": self.valid.detach().clone(),
+      "uniform_ratio": self.uniform_ratio,
+      "alpha": self.alpha,
+      "max_count_over_mean": self.max_count_over_mean,
+      "kernel_size": self.kernel_size,
+      "kernel": self.kernel.detach().clone(),
+      "failed_ema": self.failed_ema.detach().clone(),
+      "pending": self._pending.detach().clone(),
+    }
+
+  def load_state_dict(self, state_dict: dict[str, Any], strict: bool = True) -> None:
+    """Restore mutable curriculum state and recompute its sampling probabilities.
+
+    Probabilities are derived rather than serialized so loading cannot leave them
+    inconsistent with ``failed_ema`` or the current sampler hyperparameters.
+    """
+    required = {
+      "version",
+      "clip_ids",
+      "max_bins",
+      "valid",
+      "uniform_ratio",
+      "alpha",
+      "max_count_over_mean",
+      "kernel_size",
+      "kernel",
+      "failed_ema",
+      "pending",
+    }
+    missing = required.difference(state_dict)
+    unexpected = set(state_dict).difference(required)
+    if missing:
+      raise KeyError(f"AdaptiveBinSampler state is missing keys: {sorted(missing)}")
+    if strict and unexpected:
+      raise KeyError(
+        f"AdaptiveBinSampler state has unexpected keys: {sorted(unexpected)}"
+      )
+    if state_dict["version"] != 1:
+      raise ValueError(
+        "Unsupported AdaptiveBinSampler state version "
+        f"{state_dict['version']!r}; expected 1."
+      )
+    if int(state_dict["max_bins"]) != self.max_bins:
+      raise ValueError(
+        "AdaptiveBinSampler max_bins mismatch: checkpoint has "
+        f"{state_dict['max_bins']}, current sampler has {self.max_bins}."
+      )
+
+    clip_ids = torch.as_tensor(state_dict["clip_ids"], device=self.clip_ids.device)
+    if not torch.equal(clip_ids, self.clip_ids):
+      raise ValueError("AdaptiveBinSampler clip_ids do not match the checkpoint.")
+
+    valid = torch.as_tensor(state_dict["valid"], device=self.valid.device)
+    if not torch.equal(valid, self.valid):
+      raise ValueError("AdaptiveBinSampler valid bins do not match the checkpoint.")
+
+    for key in ("uniform_ratio", "alpha", "max_count_over_mean"):
+      checkpoint_value = float(state_dict[key])
+      current_value = float(getattr(self, key))
+      if not math.isclose(checkpoint_value, current_value, rel_tol=0.0, abs_tol=1e-12):
+        raise ValueError(
+          f"AdaptiveBinSampler {key} mismatch: checkpoint has {checkpoint_value}, "
+          f"current sampler has {current_value}."
+        )
+    if int(state_dict["kernel_size"]) != self.kernel_size:
+      raise ValueError(
+        "AdaptiveBinSampler kernel_size mismatch: checkpoint has "
+        f"{state_dict['kernel_size']}, current sampler has {self.kernel_size}."
+      )
+    kernel = torch.as_tensor(
+      state_dict["kernel"], device=self.kernel.device, dtype=self.kernel.dtype
+    )
+    if not torch.equal(kernel, self.kernel):
+      raise ValueError("AdaptiveBinSampler smoothing kernel does not match checkpoint.")
+
+    failed_ema = torch.as_tensor(
+      state_dict["failed_ema"],
+      device=self.failed_ema.device,
+      dtype=self.failed_ema.dtype,
+    )
+    pending = torch.as_tensor(
+      state_dict["pending"], device=self._pending.device, dtype=self._pending.dtype
+    )
+    if failed_ema.shape != self.failed_ema.shape:
+      raise ValueError(
+        "AdaptiveBinSampler failed_ema shape mismatch: checkpoint has "
+        f"{tuple(failed_ema.shape)}, expected {tuple(self.failed_ema.shape)}."
+      )
+    if pending.shape != self._pending.shape:
+      raise ValueError(
+        "AdaptiveBinSampler pending shape mismatch: checkpoint has "
+        f"{tuple(pending.shape)}, expected {tuple(self._pending.shape)}."
+      )
+
+    self.failed_ema.copy_(failed_ema)
+    self._pending.copy_(pending)
     self.refresh()
 
   # -- STAR hooks -----------------------------------------------------------

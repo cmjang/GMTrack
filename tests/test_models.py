@@ -6,12 +6,13 @@ import pytest
 import torch
 from tensordict import TensorDict
 
-from ex_grmt.rsl_rl.fsq import FSQ
+from ex_grmt.rsl_rl.fsq import FSQ, SONIC_PROXY_FSQ_LEVELS
 from ex_grmt.rsl_rl.models import (
   ACTION_HIST,
   COMMAND_WINDOW,
   PROPRIO_HIST,
   ExGRMTActor,
+  sinusoidal_positional_encoding,
 )
 
 H = 10
@@ -71,6 +72,14 @@ def test_latent_is_proprio_action_and_bottleneck():
   assert latent.shape == (BATCH, PROPRIO_DIM + ACTION_DIM + actor.token_dim)
 
 
+def test_default_fsq_matches_sonic_two_by_thirty_two_proxy():
+  actor = _actor()
+  assert isinstance(actor.fsq, FSQ)
+  assert actor.fsq.num_tokens == 2
+  assert actor.fsq.token_dim == 32
+  assert actor.fsq.levels == SONIC_PROXY_FSQ_LEVELS == 32
+
+
 def test_proprio_sequence_unflattens_per_term_not_per_frame():
   """mjlab flattens history *within* each term.
 
@@ -126,13 +135,43 @@ def test_gradient_reaches_every_branch():
     "state_enc.0.weight",
     "action_enc.0.weight",
     "command_enc.0.weight",
-    "hist_pos",
-    "command_pos",
+    "hist_attn.in_proj_weight",
+    "hist_mlp.0.weight",
+    "cross_mlp.0.weight",
     "query_proj.weight",
   ):
     assert key in named, f"missing parameter {key}"
     assert named[key].grad is not None, f"no gradient for {key}"
     assert torch.isfinite(named[key].grad).all(), f"non-finite gradient for {key}"
+  # Positional encodings are fixed sinusoidal buffers (RGMT Eq. 9/14), not
+  # trainable parameters.
+  assert "hist_pos" not in named and "command_pos" not in named
+
+
+def test_positional_encodings_are_fixed_sinusoidal_buffers():
+  actor = _actor()
+  params = dict(actor.named_parameters())
+  buffers = dict(actor.named_buffers())
+
+  assert "hist_pos" not in params and "command_pos" not in params
+  assert torch.equal(
+    buffers["hist_pos"],
+    sinusoidal_positional_encoding(actor.num_hist_tokens, actor.token_dim),
+  )
+  assert torch.equal(
+    buffers["command_pos"],
+    sinusoidal_positional_encoding(actor.num_command_tokens, actor.token_dim),
+  )
+  # Non-persistent buffers are regenerated from shape instead of accepting the old
+  # learned tensors from a checkpoint.
+  assert "hist_pos" not in actor.state_dict()
+  assert "command_pos" not in actor.state_dict()
+
+
+def test_sinusoidal_encoding_supports_odd_dimensions():
+  pe = sinusoidal_positional_encoding(length=3, dim=5)
+  assert pe.shape == (1, 3, 5)
+  assert torch.equal(pe[0, 0], torch.tensor([0.0, 1.0, 0.0, 1.0, 0.0]))
 
 
 def test_export_survives_a_backward_pass():
@@ -234,6 +273,18 @@ def test_fsq_straight_through_gradient():
   assert torch.isfinite(z.grad).all()
   # Rounding contributes nothing; the gradient is that of the tanh bound alone.
   assert (z.grad.abs() > 0).any()
+
+
+def test_fsq_even_levels_use_inverse_tanh_shift():
+  """The FSQ inverse-tanh shift maps a zero input to the zero code."""
+  fsq = FSQ(dim=8, levels=4, token_dim=8)
+  half_l = (4 - 1) * (1.0 + 1e-3) / 2.0
+  expected_zero = torch.tanh(torch.atanh(torch.tensor(0.5 / half_l))) * half_l - 0.5
+  assert torch.allclose(fsq.bound(torch.zeros(8)), expected_zero.expand(8), atol=1e-7)
+  # Four integer codes remain reachable after normalizing by floor(levels / 2).
+  out = fsq(torch.linspace(-20.0, 20.0, 1000).unsqueeze(1).expand(-1, 8))
+  expected = torch.tensor([-1.0, -0.5, 0.0, 0.5], dtype=out.dtype)
+  assert torch.isclose(out.unsqueeze(-1), expected).any(dim=-1).all()
 
 
 def test_fsq_rejects_bad_shapes():

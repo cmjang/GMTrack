@@ -16,19 +16,25 @@ What is different:
   are *acquisition* environments that sample the challenging set adaptively, the rest
   are *consolidation* environments that sample the mastered set uniformly.
 * A local reference window ``g_{t-L:t+L}`` (21 tokens x 38 dims) is exposed for the
-  command encoder, along with the STAR difficulty weight ``w_t``.
+  command encoder, along with the STAR difficulty weight ``w_t``. An opt-in
+  SONIC-style closed-loop heading variant appends six root-orientation channels to
+  each token without changing that 38D baseline.
 """
 
 from __future__ import annotations
 
+import copy
 import json
+import math
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import TYPE_CHECKING, Literal
+from typing import TYPE_CHECKING, Any, Callable, Literal
 
+import numpy as np
 import torch
 from mjlab.managers import CommandTerm, CommandTermCfg
 from mjlab.utils.lab_api.math import (
+  matrix_from_quat,
   quat_apply,
   quat_error_magnitude,
   quat_from_euler_xyz,
@@ -37,6 +43,7 @@ from mjlab.utils.lab_api.math import (
   sample_uniform,
   yaw_quat,
 )
+from mjlab.viewer.debug_visualizer import DebugVisualizer
 
 from ex_grmt.mdp.motion_library import MotionLibrary
 from ex_grmt.mdp.sampling import AdaptiveBinSampler
@@ -52,6 +59,37 @@ if TYPE_CHECKING:
 _ROOT = 0
 
 
+def _clamp_training_start_frame(
+  local_frames: torch.Tensor, clip_lengths: torch.Tensor
+) -> torch.Tensor:
+  """Clamp sampled starts before the terminal reference frame.
+
+  The terminal frame is a target state, not a valid episode start: starting there
+  makes ``motion_sequence_end`` fire before the policy executes a transition.
+  """
+  last_start = torch.clamp_min(clip_lengths - 2, 0)
+  return torch.clamp_min(torch.minimum(local_frames, last_start), 0)
+
+
+def relative_root_orientation_6d(
+  robot_root_quat_w: torch.Tensor, ref_root_quat_w: torch.Tensor
+) -> torch.Tensor:
+  """SONIC-style reference root orientation relative to the current robot root.
+
+  The inputs must be broadcast-compatible ``(..., 4)`` scalar-first quaternions.
+  The returned ``(..., 6)`` representation is formed from
+  ``q_robot_current^-1 * q_ref_future`` and flattens the first two matrix columns in
+  row-major order. This deliberately matches SONIC's released
+  ``matrix[..., :2].reshape(...)`` channel order exactly.
+
+  Kept independent of the command/environment classes so the quaternion convention
+  and channel ordering can be unit-tested without constructing a simulator.
+  """
+  relative_quat = quat_mul(quat_inv(robot_root_quat_w), ref_root_quat_w)
+  matrix = matrix_from_quat(relative_quat)
+  return matrix[..., :2].reshape(*matrix.shape[:-2], 6)
+
+
 class MultiMotionCommand(CommandTerm):
   """Reference-motion command over a library of clips."""
 
@@ -60,6 +98,25 @@ class MultiMotionCommand(CommandTerm):
 
   def __init__(self, cfg: MultiMotionCommandCfg, env: ManagerBasedRlEnv):
     super().__init__(cfg, env)
+
+    if cfg.require_v1_stratification:
+      if (
+        cfg.stratification_challenging_manifest is None
+        or cfg.stratification_mastered_manifest is None
+      ):
+        raise ValueError(
+          "Strict v1 tasks require validation manifests for both challenging D_c "
+          "and mastered D_m."
+        )
+      from ex_grmt.protocol import validate_stage2_manifests
+
+      self.stratification_report = validate_stage2_manifests(
+        cfg.manifest,
+        cfg.stratification_mastered_manifest,
+        cfg.stratification_challenging_manifest,
+      )
+    else:
+      self.stratification_report = None
 
     self.robot: Entity = env.scene[cfg.entity_name]
     self.robot_anchor_body_index = self.robot.body_names.index(cfg.anchor_body_name)
@@ -79,6 +136,37 @@ class MultiMotionCommand(CommandTerm):
     )
     print(f"[ex-grmt] {self.lib}")
 
+    if not 0.0 <= cfg.recovery_probability <= 1.0:
+      raise ValueError("recovery_probability must be in [0, 1].")
+    if cfg.recovery_probability > 0.0:
+      # ``make_ex_grmt_env_cfg`` only *builds* the assistance-force event term when it
+      # is called with recovery enabled, so raising the probability on an already-built
+      # config -- which is all a `--env.commands.motion.recovery-probability` override
+      # can do -- gives fallen resets and a termination shield with no upward force at
+      # all. That silently removes the one mechanism RGMT Sec. II-D provides for
+      # escaping fallen states. Use the ExGRMT-Stage1-Recovery-* task instead.
+      if "recovery_assist" not in env.cfg.events:
+        raise ValueError(
+          "recovery_probability > 0 but the environment has no 'recovery_assist' "
+          "event term: the assistance force can only be built by calling "
+          "make_ex_grmt_env_cfg(recovery_probability=...), not by overriding the "
+          "command afterwards. Use the ExGRMT-Stage1-Recovery-Flat-Unitree-G1 task."
+        )
+      root_low, root_high = cfg.recovery_root_height_range
+      if root_low < 0.0 or root_low > root_high:
+        raise ValueError("recovery_root_height_range must be non-negative and ordered.")
+      tilt_low, tilt_high = cfg.recovery_root_tilt_range
+      if tilt_low < 0.0 or tilt_low > tilt_high or tilt_high > math.pi:
+        raise ValueError("recovery_root_tilt_range must be ordered within [0, pi].")
+      joint_low, joint_high = cfg.recovery_joint_position_jitter
+      if joint_low > joint_high:
+        raise ValueError("recovery_joint_position_jitter must be ordered.")
+      print(
+        "[ex-grmt] RGMT random-pose recovery: "
+        f"p={cfg.recovery_probability:g}, root_z={cfg.recovery_root_height_range}, "
+        f"tilt={cfg.recovery_root_tilt_range}; no recovery-motion data"
+      )
+
     # Root-body views into the packed library (no copy; used by the command window).
     self._root_quat = self.lib.body_quat_w[:, _ROOT]
     self._root_lin_vel = self.lib.body_lin_vel_w[:, _ROOT]
@@ -87,6 +175,31 @@ class MultiMotionCommand(CommandTerm):
 
     self.motion_ids = torch.zeros(self.num_envs, dtype=torch.long, device=self.device)
     self.time_steps = torch.zeros(self.num_envs, dtype=torch.long, device=self.device)
+
+    # Fall recovery (RGMT, arXiv:2601.23080v1, Sec. II-D). ``recovery_mask`` marks
+    # environments whose current episode started from a randomized fallen pose;
+    # ``recovery_assist_raw_n`` holds that episode's U[0, 200] N draw *before* the
+    # training-progress anneal, which ``recovery_assist_n`` applies at read time.
+    # Splitting them keeps the applied force a pure function of the current clock:
+    # the environment is reset once during ``RslRlVecEnvWrapper.__init__``, which is
+    # before ``runner.load()`` restores the clock, so an episode-time draw would hand
+    # the first post-resume episodes a force annealed against a clock of zero.
+    self.recovery_mask = torch.zeros(
+      self.num_envs, dtype=torch.bool, device=self.device
+    )
+    self.recovery_assist_raw_n = torch.zeros(self.num_envs, device=self.device)
+    self._recovery_window_steps = max(
+      1, int(round(cfg.recovery_window_s / env.step_dt))
+    )
+    # Environment steps taken *with fall recovery enabled*, which is the clock the
+    # assistance anneal runs on ("linearly annealed over training iterations", RGMT
+    # Sec. II-D). It deliberately is not mjlab's ``common_step_counter``: that counts
+    # the whole training history, so enabling recovery on a resume from a run that
+    # never had it starts the anneal already exhausted and the assistance force is
+    # identically zero for every recovery episode. Checkpointed by
+    # ``ExGRMTOnPolicyRunner`` so the anneal survives a restart of a recovery run.
+    self.recovery_steps_elapsed = 0
+    self._recovery_anneal_steps = max(1, int(cfg.recovery_assist_anneal_steps))
 
     self._setup_roles()
 
@@ -97,7 +210,9 @@ class MultiMotionCommand(CommandTerm):
       dtype=torch.long,
     )
     self.num_window_tokens = int(self.window_offsets.numel())
-    self.command_token_dim = 9 + self.lib.joint_pos.shape[1]
+    self.command_token_dim = (
+      9 + self.lib.joint_pos.shape[1] + (6 if cfg.heading_closed_loop else 0)
+    )
 
     self.body_pos_relative_w = torch.zeros(
       self.num_envs, len(cfg.body_names), 3, device=self.device
@@ -106,6 +221,10 @@ class MultiMotionCommand(CommandTerm):
       self.num_envs, len(cfg.body_names), 4, device=self.device
     )
     self.body_quat_relative_w[:, :, 0] = 1.0
+
+    # Ghost model for reference-motion visualization (green semi-transparent robot).
+    self._ghost_model = None
+    self._ghost_color = np.array([0.5, 0.7, 0.5, 0.5], dtype=np.float32)
 
     for key in (
       "error_anchor_pos",
@@ -180,7 +299,7 @@ class MultiMotionCommand(CommandTerm):
       kernel_lambda=self.cfg.adaptive_lambda,
       uniform_ratio=self.cfg.adaptive_uniform_ratio,
       alpha=self.cfg.adaptive_alpha,
-      max_count=self.cfg.adaptive_max_count,
+      max_count_over_mean=self.cfg.adaptive_max_count_over_mean,
       device=self.device,
     )
 
@@ -283,7 +402,7 @@ class MultiMotionCommand(CommandTerm):
   # -- Extreme-RGMT specific outputs ----------------------------------------
 
   def command_window(self) -> torch.Tensor:
-    """Local reference window ``g_{t-L:t+L}``, shape ``(N, 2L+1, 9 + J)``.
+    """Local reference window, shape ``(N, 2L+1, 9 + J [+ 6])``.
 
     Each token is ``[v_ref, w_ref, g_ref, q_ref]`` (paper Eq. 2). Linear and angular
     velocities and the gravity direction are expressed **in the reference root frame
@@ -293,6 +412,12 @@ class MultiMotionCommand(CommandTerm):
 
     Frames outside the clip are clamped to its first/last frame rather than wrapped,
     so the window never bleeds into a neighbouring clip.
+
+    With ``heading_closed_loop=True``, each token additionally ends in the SONIC-style
+    six-dimensional relative root orientation
+    ``R(q_robot_current^-1 * q_ref_token)[:, :2]``. The robot pelvis orientation is
+    current feedback shared by every token; the reference orientation comes from
+    that token's (possibly boundary-clamped) timestamp.
     """
     idx = self.lib.window_index(self.motion_ids, self.time_steps, self.window_offsets)
     n, w = idx.shape
@@ -305,7 +430,14 @@ class MultiMotionCommand(CommandTerm):
     g_b = quat_apply(q_inv, self._gravity_w.expand(flat.shape[0], 3))
     q_ref = self.lib.joint_pos[flat]
 
-    return torch.cat([v_b, w_b, g_b, q_ref], dim=-1).view(n, w, -1)
+    token_parts = [v_b, w_b, g_b, q_ref]
+    if self.cfg.heading_closed_loop:
+      robot_root_quat = (
+        self.robot_body_quat_w[:, _ROOT, None, :].expand(-1, w, -1).reshape(-1, 4)
+      )
+      token_parts.append(relative_root_orientation_6d(robot_root_quat, quat))
+
+    return torch.cat(token_parts, dim=-1).view(n, w, -1)
 
   def star_meta(self) -> torch.Tensor:
     """``(N, 2)`` of ``[difficulty weight w_t, flat bin id]`` for STAR.
@@ -319,6 +451,152 @@ class MultiMotionCommand(CommandTerm):
     weight = self.sampler_acq.bin_weight(self.motion_ids, bins)
     bin_id = self.sampler_acq.flat_bin_id(self.motion_ids, bins)
     return torch.stack([weight, bin_id.to(weight.dtype)], dim=-1)
+
+  # -- fall recovery (RGMT Sec. II-D) ---------------------------------------
+
+  @property
+  def recovery_assist_anneal(self) -> float:
+    """Linear [1, 0] training-progress factor on the assistance force (RGMT II-D)."""
+    return max(0.0, 1.0 - self.recovery_steps_elapsed / self._recovery_anneal_steps)
+
+  @property
+  def recovery_assist_n(self) -> torch.Tensor:
+    """``(N,)`` upward assistance in newtons, annealed at the current clock.
+
+    Evaluated on read rather than frozen at episode reset so the value can never be
+    stale with respect to ``recovery_steps_elapsed``. Over one 10 s episode the
+    anneal moves by 500/2400000 = 0.021%, so this is indistinguishable from RGMT's
+    per-episode magnitude, and it removes the reset-before-checkpoint-load hazard.
+    """
+    return self.recovery_assist_anneal * self.recovery_assist_raw_n
+
+  def compute(self, dt: float) -> None:
+    """Advance the anneal clock once per *environment step*, then defer to mjlab.
+
+    ``ManagerBasedRlEnv.reset`` also calls ``command_manager.compute``, with
+    ``dt=0.0``; only ``step`` passes the real ``step_dt``. Counting inside
+    ``_update_command`` would therefore add one tick per reset on top of the steps.
+    """
+    if dt > 0.0 and self.cfg.recovery_probability > 0.0:
+      self.recovery_steps_elapsed += 1
+    super().compute(dt)
+
+  @property
+  def in_recovery_window(self) -> torch.Tensor:
+    """``(N,)`` bool: recovery environments still inside their 3 s window.
+
+    While True, the instability terminations are suspended (see the
+    ``*_outside_recovery`` terms) so the policy can complete stand-up and
+    re-stabilization within the same episode; once the window elapses the checks
+    re-engage, which is RGMT's "fails to recover within this window -> terminate".
+    """
+    return self.recovery_mask & (
+      self._env.episode_length_buf < self._recovery_window_steps
+    )
+
+  def reset(self, env_ids: torch.Tensor | slice | None) -> dict[str, float]:
+    # super().reset() runs failure attribution for the episode that just ended, so
+    # it must see the OLD recovery mask; the new draw happens after.
+    extras = super().reset(env_ids)
+    assert isinstance(env_ids, torch.Tensor)
+    self._reset_recovery(env_ids)
+    return extras
+
+  def _reset_recovery(self, env_ids: torch.Tensor) -> None:
+    """Reset selected acquisition environments to randomized unstable poses.
+
+    RGMT Sec. II-D specifies the 15% draw, randomized poses, upward assistance and
+    three-second shield, but does not publish the pose distribution. This
+    implementation constructs the pose at runtime: a low root, a broad non-upright
+    orientation, and bounded jitter around the already sampled ordinary reference
+    joint pose. The ordinary ``motion_ids`` and ``time_steps`` are deliberately left
+    untouched, so no fall/get-up demonstration or recovery-motion dataset is used.
+    """
+    cfg = self.cfg
+    self.recovery_mask[env_ids] = False
+    self.recovery_assist_raw_n[env_ids] = 0.0
+    if cfg.recovery_probability <= 0.0:
+      return
+
+    draw = torch.rand(env_ids.shape[0], device=self.device) < cfg.recovery_probability
+    # Recovery belongs to the training perturbation protocol, which Extreme-RGMT
+    # applies "during Stage I and in the acquisition environments of Stage II"
+    # (Sec. IV-B2). Consolidation environments must stay clean: their rollouts feed
+    # the pi_ref alignment loss (Eq. 15), and pi_ref never saw fallen states.
+    draw &= torch.isin(env_ids, self.acq_env_ids)
+    ids = env_ids[draw]
+    if ids.numel() == 0:
+      return
+    self.recovery_mask[ids] = True
+
+    # A recovery reset must receive the full three-second shield. Ordinary training
+    # starts may otherwise land in the last seconds of a clip, where
+    # ``motion_sequence_end`` would reset the environment before recovery can finish.
+    # Keep the same ordinary motion and move only an over-late reference timestamp to
+    # the latest start that still contains the complete window.
+    clip_lengths = self.lib.clip_len[self.motion_ids[ids]]
+    latest_start = torch.clamp_min(clip_lengths - self._recovery_window_steps - 1, 0)
+    self.time_steps[ids] = torch.minimum(self.time_steps[ids], latest_start)
+
+    # Upward assistance magnitude ~ U[0, 200] N (RGMT Sec. II-D), one draw per
+    # recovery episode. The linear anneal is applied by ``recovery_assist_n`` on
+    # read, against the recovery-local clock rather than the global step counter.
+    self.recovery_assist_raw_n[ids] = sample_uniform(
+      cfg.recovery_assist_force_range[0],
+      cfg.recovery_assist_force_range[1],
+      (ids.numel(),),
+      device=self.device,
+    )
+
+    root_pos = self._env.scene.env_origins[ids].clone()
+    root_pos[:, 2] += sample_uniform(
+      cfg.recovery_root_height_range[0],
+      cfg.recovery_root_height_range[1],
+      (ids.numel(),),
+      device=self.device,
+    )
+
+    # Sample a tilt about a random horizontal axis, then a world-yaw rotation. The
+    # lower bound keeps every selected pose materially non-upright. Scalar-first
+    # quaternions match mjlab's convention.
+    tilt = sample_uniform(
+      cfg.recovery_root_tilt_range[0],
+      cfg.recovery_root_tilt_range[1],
+      (ids.numel(),),
+      device=self.device,
+    )
+    axis_azimuth = sample_uniform(-math.pi, math.pi, (ids.numel(),), device=self.device)
+    half_tilt = 0.5 * tilt
+    root_tilt = torch.stack(
+      [
+        torch.cos(half_tilt),
+        torch.cos(axis_azimuth) * torch.sin(half_tilt),
+        torch.sin(axis_azimuth) * torch.sin(half_tilt),
+        torch.zeros_like(half_tilt),
+      ],
+      dim=-1,
+    )
+    yaw = sample_uniform(-math.pi, math.pi, (ids.numel(),), device=self.device)
+    zeros = torch.zeros_like(yaw)
+    root_ori = quat_mul(quat_from_euler_xyz(zeros, zeros, yaw), root_tilt)
+
+    frames = self.lib.frame_index(self.motion_ids[ids], self.time_steps[ids])
+    joint_pos = self.lib.joint_pos[frames].clone()
+    joint_pos += sample_uniform(
+      cfg.recovery_joint_position_jitter[0],
+      cfg.recovery_joint_position_jitter[1],
+      joint_pos.shape,
+      device=self.device,
+    )
+    self._write_reference_state_to_sim(
+      ids,
+      root_pos,
+      root_ori,
+      torch.zeros_like(root_pos),
+      torch.zeros_like(root_pos),
+      joint_pos,
+      torch.zeros_like(joint_pos),
+    )
 
   # -- CommandTerm hooks ----------------------------------------------------
 
@@ -357,6 +635,7 @@ class MultiMotionCommand(CommandTerm):
   def _resample_command(self, env_ids: torch.Tensor) -> None:
     self._record_failures(env_ids)
     self._sample_reference_states(env_ids)
+    is_acquisition = torch.isin(env_ids, self.acq_env_ids)
 
     root_pos = self.body_pos_w[env_ids, _ROOT].clone()
     root_ori = self.body_quat_w[env_ids, _ROOT].clone()
@@ -374,6 +653,7 @@ class MultiMotionCommand(CommandTerm):
     samples = sample_uniform(
       ranges[:, 0], ranges[:, 1], (len(env_ids), 6), device=self.device
     )
+    samples[~is_acquisition] = 0.0
     root_pos += samples[:, 0:3]
     root_ori = quat_mul(
       quat_from_euler_xyz(samples[:, 3], samples[:, 4], samples[:, 5]), root_ori
@@ -389,17 +669,20 @@ class MultiMotionCommand(CommandTerm):
     samples = sample_uniform(
       ranges[:, 0], ranges[:, 1], (len(env_ids), 6), device=self.device
     )
+    samples[~is_acquisition] = 0.0
     root_lin_vel += samples[:, :3]
     root_ang_vel += samples[:, 3:]
 
     joint_pos = self.joint_pos[env_ids].clone()
     joint_vel = self.joint_vel[env_ids]
-    joint_pos += sample_uniform(
+    joint_jitter = sample_uniform(
       lower=self.cfg.joint_position_range[0],
       upper=self.cfg.joint_position_range[1],
       size=joint_pos.shape,
       device=joint_pos.device,  # type: ignore[arg-type]
     )
+    joint_jitter[~is_acquisition] = 0.0
+    joint_pos += joint_jitter
 
     self._write_reference_state_to_sim(
       env_ids, root_pos, root_ori, root_lin_vel, root_ang_vel, joint_pos, joint_vel
@@ -410,6 +693,10 @@ class MultiMotionCommand(CommandTerm):
     if self.cfg.sampling_mode != "adaptive":
       return
     terminated = self._env.termination_manager.terminated[env_ids]
+    # Recovery episodes (RGMT Sec. II-D) fail because they start from a random
+    # fallen state, not because the reference bin is hard to track. Counting them
+    # would corrupt the failure statistic c_i behind Eq. (12).
+    terminated = terminated & ~self.recovery_mask[env_ids]
     if not bool(terminated.any()):
       return
     failed = env_ids[terminated]
@@ -443,8 +730,8 @@ class MultiMotionCommand(CommandTerm):
       )
       local = bins * self.lib.frames_per_bin + jitter
       self.motion_ids[ids] = clips
-      self.time_steps[ids] = torch.clamp(
-        local, torch.zeros_like(local), self.lib.clip_len[clips] - 1
+      self.time_steps[ids] = _clamp_training_start_frame(
+        local, self.lib.clip_len[clips]
       )
 
     h, top1 = self.sampler_acq.entropy_stats()
@@ -516,11 +803,134 @@ class MultiMotionCommand(CommandTerm):
       delta_ori_w, self.body_pos_w - anchor_pos_w
     )
 
+  def _debug_vis_impl(self, visualizer: DebugVisualizer) -> None:
+    """Draw a green semi-transparent ghost robot at the reference pose."""
+    env_indices = visualizer.get_env_indices(self.num_envs)
+    if not env_indices:
+      return
+
+    if self._ghost_model is None:
+      # Build a ghost model with only visual geoms visible. Collision geoms (nonzero
+      # contype/conaffinity) get alpha=0 so the viewer's alpha filter excludes them.
+      self._ghost_model = copy.deepcopy(self._env.sim.mj_model)
+      for gi in range(self._ghost_model.ngeom):
+        if (
+          self._ghost_model.geom_contype[gi] != 0
+          or self._ghost_model.geom_conaffinity[gi] != 0
+        ):
+          self._ghost_model.geom_rgba[gi, 3] = 0
+        else:
+          self._ghost_model.geom_rgba[gi] = self._ghost_color
+
+    indexing = self.robot.indexing
+    free_joint_q_adr = indexing.free_joint_q_adr.cpu().numpy()
+    joint_q_adr = indexing.joint_q_adr.cpu().numpy()
+
+    for batch in env_indices:
+      qpos = np.zeros(self._env.sim.mj_model.nq)
+      qpos[free_joint_q_adr[0:3]] = self.body_pos_w[batch, 0].cpu().numpy()
+      qpos[free_joint_q_adr[3:7]] = self.body_quat_w[batch, 0].cpu().numpy()
+      qpos[joint_q_adr] = self.joint_pos[batch].cpu().numpy()
+
+      visualizer.add_ghost_mesh(
+        qpos,
+        model=self._ghost_model,
+        label=f"ghost_{batch}",
+      )
+
+  def create_gui(
+    self,
+    name: str,
+    server: Any,
+    get_env_idx: Callable[[], int],
+    on_change: Callable[[], None] | None = None,
+    request_action: Callable[[str, Any], None] | None = None,
+  ) -> None:
+    """Add a clip selector dropdown and frame scrubber to the viser GUI."""
+    # Build clip name list with index labels.
+    clip_names = self.lib.clip_names  # list[str] of length num_clips
+    clip_options = [f"[{i:03d}] {n}" for i, n in enumerate(clip_names)]
+
+    with server.gui.add_folder(name.capitalize()):
+      clip_dropdown = server.gui.add_dropdown(
+        "Clip",
+        options=clip_options,
+        initial_value=clip_options[0],
+      )
+      scrubber = server.gui.add_slider(
+        "Frame",
+        min=0,
+        max=500,
+        step=1,
+        initial_value=0,
+      )
+
+      @clip_dropdown.on_update
+      def _(_) -> None:
+        idx = get_env_idx()
+        new_clip = clip_options.index(clip_dropdown.value)
+        self.motion_ids[idx] = new_clip
+        self.time_steps[idx] = 0
+        # Update scrubber max to match the new clip length.
+        scrubber.max = int(self.lib.clip_len[new_clip].item()) - 1
+        scrubber.value = 0
+        env_ids = torch.tensor([idx], device=self.device)
+        self._write_reference_state_to_sim(
+          env_ids,
+          self.body_pos_w[env_ids, _ROOT],
+          self.body_quat_w[env_ids, _ROOT],
+          self.body_lin_vel_w[env_ids, _ROOT],
+          self.body_ang_vel_w[env_ids, _ROOT],
+          self.joint_pos[env_ids],
+          self.joint_vel[env_ids],
+        )
+        if on_change is not None:
+          on_change()
+
+      @scrubber.on_update
+      def _(_) -> None:
+        idx = get_env_idx()
+        self.time_steps[idx] = int(scrubber.value)
+        if on_change is not None:
+          on_change()
+
+      all_envs_cb = server.gui.add_checkbox("All envs", initial_value=True)
+      start_btn = server.gui.add_button("Start Here")
+
+      @start_btn.on_click
+      def _(_) -> None:
+        if request_action is not None:
+          request_action(
+            "CUSTOM",
+            {"type": "gui_reset", "all_envs": all_envs_cb.value},
+          )
+
+    self._scrubber_handles = (scrubber, all_envs_cb, start_btn, clip_dropdown)
+    self._set_scrubber_disabled(True)
+
+  def _set_scrubber_disabled(self, disabled: bool) -> None:
+    for handle in self._scrubber_handles:
+      handle.disabled = disabled
+
+  def on_viewer_pause(self, paused: bool) -> None:
+    if hasattr(self, "_scrubber_handles"):
+      self._set_scrubber_disabled(not paused)
+
   def _update_command(self) -> None:
     self.time_steps += 1
+    if self.cfg.clamp_at_end:
+      last_frames = self.lib.clip_len[self.motion_ids] - 1
+      self.time_steps = torch.minimum(self.time_steps, last_frames)
+      self.update_relative_body_poses()
+      return
+
     done = torch.where(self.time_steps >= self.lib.clip_len[self.motion_ids])[0]
     if done.numel() > 0:
       self._resample_command(done)
+      # The mid-episode clip hop above snapped the robot onto a fresh reference; it
+      # is no longer in a recovery scenario and must not keep its termination shield.
+      self.recovery_mask[done] = False
+      self.recovery_assist_raw_n[done] = 0.0
       # _resample_command writes qpos/qvel but does not refresh derived quantities;
       # forward() so update_relative_body_poses reads the post-teleport anchor.
       self._env.sim.forward()
@@ -555,7 +965,7 @@ class MultiMotionCommandCfg(CommandTermCfg):
   """Configuration for :class:`MultiMotionCommand`."""
 
   manifest: str
-  """Path to the clip manifest produced by ``ex_grmt.scripts.prepare_motions``."""
+  """Path to a complete-sequence or post-Stage-I logical-clip manifest."""
   anchor_body_name: str
   body_names: tuple[str, ...]
   """Tracked bodies. **Must start with the floating-base root link.**"""
@@ -569,22 +979,87 @@ class MultiMotionCommandCfg(CommandTermCfg):
   """Mastered set ``D_m``. Required when ``acquisition_fraction`` is set."""
   acquisition_fraction: float | None = None
   """``xi`` in Algorithm 1. None disables the PACE split (Stage I). Paper uses 0.8."""
+  require_v1_stratification: bool = False
+  """Fail closed unless Stage-II manifests carry valid v1 stratification provenance."""
+  stratification_mastered_manifest: str | None = None
+  """Authenticated D_m input used only for strict protocol validation."""
+  stratification_challenging_manifest: str | None = None
+  """Authenticated D_c input used only for strict protocol validation."""
 
   pose_range: dict[str, tuple[float, float]] = field(default_factory=dict)
   velocity_range: dict[str, tuple[float, float]] = field(default_factory=dict)
-  joint_position_range: tuple[float, float] = (-0.1, 0.1)
+  joint_position_range: tuple[float, float] = (0.0, 0.0)
 
   bin_seconds: float = 1.0
   adaptive_kernel_size: int = 1
+  """Faithful Eq. (12)-(13) default. Values above 1 enable an unpublished smoothing
+  ablation and must not be used for the main reproduction."""
   adaptive_lambda: float = 0.8
   adaptive_uniform_ratio: float = 0.1
   adaptive_alpha: float = 0.001
-  adaptive_max_count: float = 1.0
-  """``c_max`` in Eq. (13). mjlab omits this clip; the paper specifies it."""
+  adaptive_max_count_over_mean: float = 200.0
+  """``c_max`` multiplier in Eq. (13). Following SONIC's public training release
+  (``adp_samp_failure_rate_max_over_mean``), the actual clip bound is
+  ``mean(active failed EMA) * adaptive_max_count_over_mean``.
+  SONIC releases use 200; the library default is 50. Value is only meaningful
+  when ``sampling_mode`` is ``"adaptive"``."""
   sampling_mode: Literal["adaptive", "uniform", "start"] = "adaptive"
+  clamp_at_end: bool = False
+  """Hold the last reference frame instead of resampling a new clip.
+
+  This is an evaluation-only control: deterministic full-sequence rollouts must score
+  the final transition without teleporting the robot back to frame zero.
+  """
 
   command_window_radius: int = 10
   """``L``. The window has ``2L + 1`` tokens; the paper uses 21, i.e. L = 10."""
+  heading_closed_loop: bool = False
+  """Append SONIC-style closed-loop relative pelvis orientation to every token.
+
+  False preserves the Extreme-RGMT command exactly at 38 channels per token. True
+  appends the first two rotation-matrix columns of
+  ``q_robot_current^-1 * q_ref_future``, producing 44 channels per token.
+  """
+
+  recovery_probability: float = 0.0
+  """Probability that a resetting environment becomes a recovery environment.
+  RGMT (arXiv:2601.23080v1) Sec. II-D uses 0.15; Extreme-RGMT inherits the mechanism
+  without restating it. 0 disables fall-recovery training entirely -- the play,
+  evaluation and stratification paths rely on that."""
+  recovery_window_s: float = 3.0
+  """Recovery window during which instability terminations are suspended
+  (RGMT Sec. II-D: "a predetermined recovery window of 3 seconds")."""
+  recovery_assist_force_range: tuple[float, float] = (0.0, 200.0)
+  """Upward assistance-force magnitude range in newtons (RGMT Sec. II-D)."""
+  recovery_assist_anneal_steps: int = 2_400_000
+  """Env steps over which the assistance force anneals linearly to zero. RGMT says
+  "linearly annealed over training iterations" without a number; 2.4M env steps is
+  100k iterations x 24 rollout steps, the nominal Stage-I run. ASSUMPTION -- it has to
+  track ``rl_cfgs.stage1_runner_cfg``'s ``max_iterations``: anneal shorter than the run
+  means the assistance is gone for most of training, longer means it never reaches 0.
+
+  The clock is ``MultiMotionCommand.recovery_steps_elapsed`` -- steps taken with
+  ``recovery_probability > 0`` -- which the runner checkpoints, so resuming a
+  recovery run continues the same schedule while enabling recovery on top of a
+  checkpoint that never had it starts the schedule from zero. RGMT trains recovery
+  in a single end-to-end run, where the two coincide."""
+  recovery_root_height_range: tuple[float, float] = (0.35, 0.65)
+  """Pelvis-height range in metres for randomized recovery poses. ASSUMPTION: RGMT
+  publishes no pose distribution; this low range yields contact-rich starts without
+  requiring any recovery motion data."""
+  recovery_root_tilt_range: tuple[float, float] = (
+    math.pi / 3.0,
+    2.0 * math.pi / 3.0,
+  )
+  """Absolute root tilt about a random horizontal axis, radians. ASSUMPTION: the
+  60--120 degree range excludes upright starts while avoiding exclusively inverted
+  configurations; yaw is sampled uniformly over the full circle."""
+  recovery_joint_position_jitter: tuple[float, float] = (-0.25, 0.25)
+  """Per-joint offset around the ordinary reference pose, radians. ASSUMPTION: values
+  are clipped to the robot's soft limits and initial velocities are zero."""
+
+  debug_vis: bool = True
+  """Show the reference motion as a green semi-transparent ghost robot."""
 
   def build(self, env: ManagerBasedRlEnv) -> MultiMotionCommand:
     return MultiMotionCommand(self, env)

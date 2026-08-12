@@ -110,9 +110,7 @@ def motion_global_body_linear_velocity_error_exp(
   command = _cmd(env, command_name)
   idx = _get_body_indexes(command, body_names)
   error = torch.sum(
-    torch.square(
-      command.body_lin_vel_w[:, idx] - command.robot_body_lin_vel_w[:, idx]
-    ),
+    torch.square(command.body_lin_vel_w[:, idx] - command.robot_body_lin_vel_w[:, idx]),
     dim=-1,
   )
   return torch.exp(-error.mean(-1) / std**2)
@@ -127,9 +125,7 @@ def motion_global_body_angular_velocity_error_exp(
   command = _cmd(env, command_name)
   idx = _get_body_indexes(command, body_names)
   error = torch.sum(
-    torch.square(
-      command.body_ang_vel_w[:, idx] - command.robot_body_ang_vel_w[:, idx]
-    ),
+    torch.square(command.body_ang_vel_w[:, idx] - command.robot_body_ang_vel_w[:, idx]),
     dim=-1,
   )
   return torch.exp(-error.mean(-1) / std**2)
