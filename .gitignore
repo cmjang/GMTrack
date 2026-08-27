@@ -46,10 +46,10 @@ scripts/slurm/*
 !scripts/slurm/stratify_dong29999_probe.sbatch
 !scripts/slurm/train_stage2_dong29999_probe.sbatch
 !scripts/slurm/evaluate_dong29999_probe.sbatch
+!scripts/slurm/train_stage1_causal.sbatch
 
-# Local paper PDFs
+# Local paper PDFs -- kept out of the repository; download them from arXiv.
 2601.23080v1.pdf
 2607.20110v1.pdf
-!2607.20110v1.pdf
 
 # Generated motion manifests and reports are covered by the data rules above.
