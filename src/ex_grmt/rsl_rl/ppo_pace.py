@@ -22,9 +22,9 @@ IMPLEMENTATION DETAILS:
   failure. Timeouts and ordinary motion ends do not shorten this prefix. See
   :meth:`~ex_grmt.rsl_rl.storage.StarRolloutStorage.valid_sample_counts`.
 * Acquisition rows alone drive advantage normalization, PPO surrogate, value,
-  entropy, and adaptive-KL. Consolidation rows are reserved exclusively for Eq. (15),
-  matching the paper's statement that each rollout group contributes only its
-  corresponding loss.
+  entropy, adaptive-KL, and the causal task's intent reconstruction/KL auxiliary
+  objective. Consolidation rows are reserved exclusively for Eq. (15), matching the
+  PACE rule that each rollout group contributes only its corresponding loss.
 * Distributed runs aggregate the sufficient statistics used by PACE and STAR before
   updating them, so every rank applies the same normalization and consolidation
   weight.
@@ -33,6 +33,7 @@ IMPLEMENTATION DETAILS:
 from __future__ import annotations
 
 import copy
+from typing import cast
 
 import torch
 import torch.nn as nn
@@ -43,7 +44,108 @@ from rsl_rl.models import MLPModel
 from rsl_rl.utils import resolve_callable, resolve_obs_groups
 from tensordict import TensorDict
 
+from ex_grmt.mdp.commands import MultiMotionCommand
+from ex_grmt.provenance import (
+  CHECKPOINT_OBSERVATION_SCHEMA_KEY,
+  build_observation_schema,
+  validate_checkpoint_observation_schema,
+)
+from ex_grmt.rsl_rl.models import ExGRMTActor
 from ex_grmt.rsl_rl.storage import TRACKING_FAILURES_EXTRA, StarRolloutStorage
+
+
+def _runtime_observation_schema(
+  obs: TensorDict,
+  env: VecEnv,
+  actor_cfg: dict,
+  obs_groups: dict[str, list[str]],
+) -> dict:
+  """Describe the exact actor/critic observation ABI constructed for this run."""
+  raw_env = env.unwrapped
+  command = raw_env.command_manager.get_term("motion")
+  if not isinstance(command, MultiMotionCommand):
+    raise TypeError("ExGRMT observation schema requires MultiMotionCommand.")
+
+  command_token_dim = int(actor_cfg["command_token_dim"])
+  if command_token_dim != command.command_token_dim:
+    raise ValueError(
+      "Actor and command token widths differ while building observation schema: "
+      f"{command_token_dim} != {command.command_token_dim}."
+    )
+  actor_groups = list(obs_groups["actor"])
+  critic_groups = list(obs_groups["critic"])
+  use_intent_aux = bool(actor_cfg["use_intent_aux"])
+  schema_only_groups = (
+    ["future_reconstruction_target", "future_reconstruction_valid_mask"]
+    if use_intent_aux
+    else []
+  )
+  group_widths = {
+    name: int(obs[name].shape[-1])
+    for name in dict.fromkeys((*actor_groups, *critic_groups, *schema_only_groups))
+  }
+  configured_actor_offsets = actor_cfg["command_window_offsets"]
+  runtime_actor_offsets = command.window_offsets.detach().cpu().tolist()
+  command_has_explicit_offsets = command.cfg.command_window_offsets is not None
+  actor_has_explicit_offsets = configured_actor_offsets is not None
+  if command_has_explicit_offsets != actor_has_explicit_offsets:
+    raise ValueError(
+      "Actor and command must either both configure exact window offsets or both "
+      "use the legacy radius/slot-index contract."
+    )
+  if configured_actor_offsets is not None and list(configured_actor_offsets) != runtime_actor_offsets:
+    raise ValueError(
+      "Actor positional-encoding offsets do not match the command window: "
+      f"{list(configured_actor_offsets)} != {runtime_actor_offsets}."
+    )
+  configured_reconstruction_offsets = list(
+    actor_cfg["future_reconstruction_offsets"]
+  )
+  runtime_reconstruction_offsets = (
+    command.reconstruction_window_offsets.detach().cpu().tolist()
+  )
+  if configured_reconstruction_offsets != runtime_reconstruction_offsets:
+    raise ValueError(
+      "Actor reconstruction offsets do not match the command targets: "
+      f"{configured_reconstruction_offsets} != {runtime_reconstruction_offsets}."
+    )
+  critic_offsets = command.critic_window_offsets.detach().cpu().tolist()
+  use_history_valid_mask = bool(actor_cfg["use_history_valid_mask"])
+  use_past_valid_mask = bool(actor_cfg["use_command_valid_mask"])
+  use_future_valid_mask = bool(critic_offsets)
+  expected_future_groups = {"command_future_window", "future_valid_mask"}
+  if use_future_valid_mask != expected_future_groups.issubset(critic_groups):
+    raise ValueError(
+      "Critic future offsets and future observation groups must be enabled together."
+    )
+  return build_observation_schema(
+    actor_observation_groups=actor_groups,
+    critic_observation_groups=critic_groups,
+    observation_group_widths=group_widths,
+    command_window_offsets=runtime_actor_offsets,
+    critic_window_offsets=critic_offsets,
+    reconstruction_window_offsets=runtime_reconstruction_offsets,
+    command_fps=command.lib.fps,
+    command_token_dim=command_token_dim,
+    heading_closed_loop=bool(command.cfg.heading_closed_loop),
+    history_length=int(actor_cfg["history_length"]),
+    proprio_term_names=list(
+      raw_env.observation_manager.active_terms["proprio_hist"]
+    ),
+    proprio_term_dims=list(actor_cfg["proprio_term_dims"]),
+    action_dim=int(env.num_actions),
+    use_past_valid_mask=use_past_valid_mask,
+    use_history_valid_mask=use_history_valid_mask,
+    use_future_valid_mask=use_future_valid_mask,
+    use_reconstruction_valid_mask=use_intent_aux,
+    command_position_encoding=(
+      "legacy_sinusoidal_slot_index"
+      if configured_actor_offsets is None
+      else "sinusoidal_normalized_actual_offset"
+    ),
+    use_intent_aux=use_intent_aux,
+    intent_latent_dim=int(actor_cfg["intent_latent_dim"]),
+  )
 
 
 class PacePPO(PPO):
@@ -54,6 +156,8 @@ class PacePPO(PPO):
     actor: MLPModel,
     critic: MLPModel,
     storage: StarRolloutStorage,
+    observation_schema: dict,
+    require_observation_schema: bool,
     acquisition_fraction: float | None = None,
     lambda_base: float = 0.3,
     kappa: float = 5.0,
@@ -65,6 +169,8 @@ class PacePPO(PPO):
     rho_topk: float = 0.05,
     rho_star: float = 0.25,
     base_checkpoint: str | None = None,
+    intent_reconstruction_coef: float = 0.0,
+    intent_kl_coef: float = 0.0,
     **kwargs,
   ) -> None:
     unsupported = []
@@ -98,6 +204,22 @@ class PacePPO(PPO):
     self.rho_topk = rho_topk
     self.rho_star = rho_star
     self.base_checkpoint = base_checkpoint
+    if intent_reconstruction_coef < 0.0 or intent_kl_coef < 0.0:
+      raise ValueError("Intent reconstruction and KL coefficients must be non-negative.")
+    self.intent_reconstruction_coef = intent_reconstruction_coef
+    self.intent_kl_coef = intent_kl_coef
+    self.use_intent_aux = (
+      intent_reconstruction_coef > 0.0 or intent_kl_coef > 0.0
+    )
+    if self.use_intent_aux:
+      if not isinstance(self._raw_actor, ExGRMTActor):
+        raise TypeError("Intent auxiliary losses require ExGRMTActor.")
+      if not self._raw_actor.use_intent_aux:
+        raise ValueError(
+          "Nonzero intent loss coefficients require actor.use_intent_aux=True."
+        )
+    self.observation_schema = observation_schema
+    self.require_observation_schema = require_observation_schema
 
     # Eq. (18): the smoothed ratio starts at rho_ref so lambda_con starts at lambda_base.
     self.rho_bar = rho_ref
@@ -203,6 +325,9 @@ class PacePPO(PPO):
       "lambda_con": self.lambda_con,
       "learning_rate": self.learning_rate,
     }
+    saved[CHECKPOINT_OBSERVATION_SCHEMA_KEY] = copy.deepcopy(
+      self.observation_schema
+    )
     if self.actor_ref is not None:
       saved["actor_ref_state_dict"] = self.actor_ref.state_dict()
     return saved
@@ -215,6 +340,11 @@ class PacePPO(PPO):
     run's configured learning rate). This also keeps ``self.learning_rate`` and the
     optimizer param groups from silently disagreeing.
     """
+    validate_checkpoint_observation_schema(
+      loaded_dict,
+      self.observation_schema,
+      require_present=self.require_observation_schema,
+    )
     configured_lr = self.learning_rate
     load_optimizer = load_cfg is None or bool(load_cfg.get("optimizer", False))
     load_iteration = super().load(loaded_dict, load_cfg, strict)
@@ -380,6 +510,39 @@ class PacePPO(PPO):
 
   # -- update ---------------------------------------------------------------
 
+  @staticmethod
+  def _masked_intent_losses(
+    reconstruction_rows: torch.Tensor,
+    kl_rows: torch.Tensor,
+    valid_counts: torch.Tensor,
+    acq_mask: torch.Tensor,
+  ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Reduce auxiliary rows using the storage-provided PACE acquisition mask."""
+    if acq_mask.dtype is not torch.bool:
+      raise TypeError(f"acq_mask must be bool, got {acq_mask.dtype}.")
+    expected = acq_mask.shape
+    for name, values in (
+      ("reconstruction_rows", reconstruction_rows),
+      ("kl_rows", kl_rows),
+      ("valid_counts", valid_counts),
+    ):
+      if values.shape != expected:
+        raise ValueError(
+          f"{name} must match acq_mask shape {expected}, got {values.shape}."
+        )
+    if not bool(acq_mask.any()):
+      raise RuntimeError("Intent auxiliary objective received no acquisition rows.")
+    reconstruction_mask = acq_mask & (valid_counts > 0)
+    if not bool(reconstruction_mask.any()):
+      raise RuntimeError(
+        "Acquisition mini-batch has no valid future reconstruction target."
+      )
+    return (
+      reconstruction_rows[reconstruction_mask].mean(),
+      kl_rows[acq_mask].mean(),
+      valid_counts[acq_mask].float().mean(),
+    )
+
   def update(self) -> dict[str, float]:  # noqa: C901 - mirrors upstream structure
     n_acq, n_con = self._update_lambda_con()
 
@@ -387,6 +550,9 @@ class PacePPO(PPO):
     mean_surrogate_loss = 0.0
     mean_entropy = 0.0
     mean_consolidation = 0.0
+    mean_intent_reconstruction = 0.0
+    mean_intent_kl = 0.0
+    mean_intent_valid_tokens = 0.0
     # Table III trains with the adaptive-KL schedule, whose only observable effect is
     # the learning rate. When that rate sits on rsl-rl's 1e-5 floor the schedule is
     # asking for a smaller step than it can take, and the run looks identical whether
@@ -463,6 +629,29 @@ class PacePPO(PPO):
         - self.entropy_coef * acquisition_entropy
       )
 
+      # Training-only intent objective. `acq_mask` is emitted by the same
+      # pace_env_split-backed storage path as PPO/PACE; never reconstruct or
+      # regularize consolidation rows, whose sole objective is L_con.
+      if self.use_intent_aux:
+        if not isinstance(self._raw_actor, ExGRMTActor):
+          raise TypeError("Intent auxiliary losses require ExGRMTActor.")
+        reconstruction_rows, kl_rows, valid_counts = (
+          self._raw_actor.auxiliary_future_losses(batch.observations)
+        )
+        reconstruction_loss, intent_kl_loss, valid_token_mean = (
+          self._masked_intent_losses(
+            reconstruction_rows, kl_rows, valid_counts, acq_mask
+          )
+        )
+        loss = (
+          loss
+          + self.intent_reconstruction_coef * reconstruction_loss
+          + self.intent_kl_coef * intent_kl_loss
+        )
+        mean_intent_reconstruction += reconstruction_loss.item()
+        mean_intent_kl += intent_kl_loss.item()
+        mean_intent_valid_tokens += float(valid_token_mean.item())
+
       # -- consolidation: BC against the frozen Stage-I policy (Eq. 15) --
       if has_con:
         assert self.actor_ref is not None, (
@@ -520,6 +709,14 @@ class PacePPO(PPO):
       "critic_grad_norm_mean": critic_grad_norm_sum / num_updates,
       "critic_grad_norm_max": critic_grad_norm_max,
     }
+    if self.use_intent_aux:
+      loss_dict.update(
+        {
+          "intent_reconstruction": mean_intent_reconstruction / num_updates,
+          "intent_kl": mean_intent_kl / num_updates,
+          "intent_valid_future_tokens": mean_intent_valid_tokens / num_updates,
+        }
+      )
     # Stable shorthand keys are the mini-batch means; explicit mean/max fields retain
     # enough detail to distinguish isolated spikes from a persistently large update.
     loss_dict["actor_grad_norm"] = loss_dict["actor_grad_norm_mean"]
@@ -622,6 +819,23 @@ class PacePPO(PPO):
 
     # Actor cfg is consumed by the constructor, so snapshot it for pi_ref first.
     actor_cfg = copy.deepcopy(cfg["actor"])
+    observation_schema = _runtime_observation_schema(
+      obs, env, actor_cfg, cfg["obs_groups"]
+    )
+    raw_env = env.unwrapped
+    command = raw_env.command_manager.get_term("motion")
+    if not isinstance(command, MultiMotionCommand):
+      raise TypeError("ExGRMT checkpoint schema requires MultiMotionCommand.")
+    require_observation_schema = not (
+      actor_cfg["command_window_offsets"] is None
+      and command.cfg.command_window_offsets is None
+      and command.cfg.command_window_radius == 10
+      and not actor_cfg["use_command_valid_mask"]
+      and not actor_cfg["use_history_valid_mask"]
+      and not actor_cfg["use_intent_aux"]
+      and command.critic_window_offsets.numel() == 0
+      and command.reconstruction_window_offsets.numel() == 0
+    )
 
     actor: MLPModel = actor_class(
       obs, cfg["obs_groups"], "actor", env.num_actions, **cfg["actor"]
@@ -648,11 +862,23 @@ class PacePPO(PPO):
     )
 
     alg = alg_class(
-      actor, critic, storage, device=device, **alg_cfg, multi_gpu_cfg=cfg["multi_gpu"]
+      actor,
+      critic,
+      storage,
+      observation_schema=observation_schema,
+      require_observation_schema=require_observation_schema,
+      device=device,
+      **alg_cfg,
+      multi_gpu_cfg=cfg["multi_gpu"],
     )
 
     if base_checkpoint:
       loaded = torch.load(base_checkpoint, map_location=device, weights_only=False)
+      validate_checkpoint_observation_schema(
+        cast(dict, loaded),
+        observation_schema,
+        require_present=require_observation_schema,
+      )
       # Warm-start pi_theta from the Stage-I base policy (Algorithm 1, line 1).
       actor.load_state_dict(loaded["actor_state_dict"])
       critic.load_state_dict(loaded["critic_state_dict"])

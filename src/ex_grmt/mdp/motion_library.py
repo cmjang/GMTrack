@@ -15,6 +15,7 @@ the indexed copy, which doubles VRAM for no benefit here).
 from __future__ import annotations
 
 import json
+import zipfile
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -48,6 +49,32 @@ class ClipInfo:
   num_frames: int
   fps: float
   frame_start: int = 0
+  frame_stop: int | None = None
+
+
+def _npz_frame_count(path: Path) -> int:
+  """Read the leading frame count from an npz member without decoding its payload."""
+  member = "joint_pos.npy"
+  with zipfile.ZipFile(path) as archive:
+    if member not in archive.namelist():
+      raise KeyError(
+        f"{path} is missing required key 'joint_pos'. Motion npz files must be "
+        f"produced by mjlab's csv_to_npz (body ordering is MuJoCo depth-first "
+        f"and is NOT interchangeable with IsaacLab-produced files)."
+      )
+    with archive.open(member) as array_file:
+      version = np.lib.format.read_magic(array_file)
+      if version == (1, 0):
+        shape, _, _ = np.lib.format.read_array_header_1_0(array_file)
+      elif version == (2, 0):
+        shape, _, _ = np.lib.format.read_array_header_2_0(array_file)
+      else:
+        raise ValueError(
+          f"{path} uses unsupported npy header version {version} for 'joint_pos'."
+        )
+  if not shape:
+    raise ValueError(f"{path} required array 'joint_pos' has no frame dimension.")
+  return int(shape[0])
 
 
 def _load_motion_arrays(
@@ -137,8 +164,11 @@ class MotionLibrary:
     body_lin_vel_w (F, B, 3)
     body_ang_vel_w (F, B, 3)
 
-  where ``F = sum(clip_lengths)``. A ``(motion_id, local_step)`` pair maps to the
-  global row ``clip_start[motion_id] + local_step``.
+  ``F`` is the sum of full parent-sequence lengths, with each physical npz packed
+  exactly once. ``clip_start`` / ``clip_len`` describe the logical range used for
+  sampling and termination, while ``clip_read_start`` / ``clip_read_len`` describe
+  the parent range available to temporal windows. A ``(motion_id, local_step)`` pair
+  maps to the global row ``clip_start[motion_id] + local_step``.
 
   Args:
     motion_files: Clip ``.npz`` paths, in the order they should be indexed.
@@ -171,122 +201,126 @@ class MotionLibrary:
     self._body_indexes = body_indexes.to(device)
     self.bin_seconds = bin_seconds
 
-    joint_pos, joint_vel = [], []
-    body_pos, body_quat, body_lin_vel, body_ang_vel = [], [], [], []
     infos: list[ClipInfo] = []
     lengths: list[int] = []
-
     body_idx_np = body_indexes.cpu().numpy()
+    physical_groups: dict[Path, list[int]] = {}
+    load_paths: dict[Path, Path] = {}
+    logical_physical_paths: list[Path] = []
+    frame_starts: list[int] = []
+    source_lengths: dict[Path, int] = {}
+
+    for i, path_arg in enumerate(motion_files):
+      path = Path(path_arg)
+      physical_path = path.resolve()
+      physical_groups.setdefault(physical_path, []).append(i)
+      load_paths.setdefault(physical_path, path)
+      logical_physical_paths.append(physical_path)
+      if physical_path not in source_lengths:
+        source_lengths[physical_path] = _npz_frame_count(path)
+
+      source_frames = source_lengths[physical_path]
+      if clip_infos is None:
+        frame_start = 0
+        n = source_frames
+      else:
+        info = clip_infos[i]
+        frame_start = _manifest_int(info.frame_start, "frame_start", path)
+        n = _manifest_int(info.num_frames, "num_frames", path)
+        if info.frame_stop is not None:
+          frame_stop = _manifest_int(info.frame_stop, "frame_stop", path)
+          if frame_stop != frame_start + n:
+            raise ValueError(
+              f"{path} frame_stop {frame_stop} does not equal frame_start + "
+              f"num_frames ({frame_start + n})."
+            )
+
+      if frame_start < 0:
+        raise ValueError(f"{path} frame_start must be non-negative, got {frame_start}.")
+      if n <= 0:
+        raise ValueError(f"{path} num_frames must be positive, got {n}.")
+      if n < 2:
+        raise ValueError(f"{path} logical clip has {n} frames; need at least 2.")
+      if frame_start + n > source_frames:
+        raise ValueError(
+          f"{path} frame range [{frame_start}, {frame_start + n}) exceeds "
+          f"the source length of {source_frames} frames."
+        )
+      frame_starts.append(frame_start)
+      lengths.append(n)
+
+    physical_starts: dict[Path, int] = {}
+    packed_total_frames = 0
+    for physical_path in physical_groups:
+      physical_starts[physical_path] = packed_total_frames
+      packed_total_frames += source_lengths[physical_path]
+
+    packed: dict[str, torch.Tensor] = {}
+    packed_shapes: dict[str, tuple[int, ...]] | None = None
+    source_fps_by_path: dict[Path, float] = {}
+    for physical_path, indices in physical_groups.items():
+      path = load_paths[physical_path]
+      arrays, source_fps = _load_motion_arrays(path, load_fps=True)
+      source_frames = int(arrays["joint_pos"].shape[0])
+      if source_frames != source_lengths[physical_path]:
+        raise RuntimeError(
+          f"{path} changed while being loaded: its header reported "
+          f"{source_lengths[physical_path]} frames but its arrays contain "
+          f"{source_frames}."
+        )
+      if source_fps is None:
+        raise RuntimeError(f"Internal error: {path} fps was not loaded.")
+      source_fps_by_path[physical_path] = source_fps
+      if clip_infos is not None:
+        for i in indices:
+          if float(clip_infos[i].fps) != source_fps:
+            raise ValueError(
+              f"{path} manifest fps {clip_infos[i].fps} does not match the "
+              f"physical motion fps {source_fps}."
+            )
+
+      selected_shapes = _selected_shapes(arrays, len(body_idx_np))
+      if packed_shapes is None:
+        packed_shapes = selected_shapes
+        packed = {
+          key: torch.empty((packed_total_frames, *shape), dtype=torch.float32)
+          for key, shape in packed_shapes.items()
+        }
+      elif selected_shapes != packed_shapes:
+        raise ValueError(
+          f"{path} motion array shapes {selected_shapes} do not match the first "
+          f"physical motion file's shapes {packed_shapes}."
+        )
+
+      destination_start = physical_starts[physical_path]
+      _copy_range_into(
+        packed,
+        arrays,
+        slice(0, source_frames),
+        slice(destination_start, destination_start + source_frames),
+        body_idx_np,
+      )
+      del arrays
+
+    if packed_shapes is None:
+      raise RuntimeError("Internal error: no physical motion files were packed.")
+
     if clip_infos is None:
-      for path_arg in motion_files:
+      for path_arg, physical_path, n in zip(
+        motion_files, logical_physical_paths, lengths, strict=True
+      ):
         path = Path(path_arg)
-        arrays, source_fps = _load_motion_arrays(path, load_fps=True)
-        n = int(arrays["joint_pos"].shape[0])
-        if n < 2:
-          raise ValueError(f"{path} logical clip has {n} frames; need at least 2.")
-        lengths.append(n)
-
-        joint_pos.append(torch.as_tensor(arrays["joint_pos"], dtype=torch.float32))
-        joint_vel.append(torch.as_tensor(arrays["joint_vel"], dtype=torch.float32))
-        body_pos.append(
-          torch.as_tensor(arrays["body_pos_w"][:, body_idx_np], dtype=torch.float32)
-        )
-        body_quat.append(
-          torch.as_tensor(arrays["body_quat_w"][:, body_idx_np], dtype=torch.float32)
-        )
-        body_lin_vel.append(
-          torch.as_tensor(arrays["body_lin_vel_w"][:, body_idx_np], dtype=torch.float32)
-        )
-        body_ang_vel.append(
-          torch.as_tensor(arrays["body_ang_vel_w"][:, body_idx_np], dtype=torch.float32)
-        )
-
-        if source_fps is None:
-          raise RuntimeError(f"Internal error: {path} fps was not loaded.")
         infos.append(
           ClipInfo(
             name=path.stem,
             source="unknown",
             path=str(path),
             num_frames=n,
-            fps=source_fps,
+            fps=source_fps_by_path[physical_path],
           )
         )
-
-      packed = {
-        "joint_pos": torch.cat(joint_pos),
-        "joint_vel": torch.cat(joint_vel),
-        "body_pos_w": torch.cat(body_pos),
-        "body_quat_w": torch.cat(body_quat),
-        "body_lin_vel_w": torch.cat(body_lin_vel),
-        "body_ang_vel_w": torch.cat(body_ang_vel),
-      }
     else:
       infos = list(clip_infos)
-      physical_groups: dict[Path, list[int]] = {}
-      load_paths: dict[Path, Path] = {}
-      frame_starts: list[int] = []
-      for i, (path_arg, info) in enumerate(zip(motion_files, clip_infos, strict=True)):
-        path = Path(path_arg)
-        frame_start = _manifest_int(info.frame_start, "frame_start", path)
-        n = _manifest_int(info.num_frames, "num_frames", path)
-        if frame_start < 0:
-          raise ValueError(
-            f"{path} frame_start must be non-negative, got {frame_start}."
-          )
-        if n <= 0:
-          raise ValueError(f"{path} num_frames must be positive, got {n}.")
-        if n < 2:
-          raise ValueError(f"{path} logical clip has {n} frames; need at least 2.")
-        frame_starts.append(frame_start)
-        lengths.append(n)
-
-        physical_path = path.resolve()
-        physical_groups.setdefault(physical_path, []).append(i)
-        load_paths.setdefault(physical_path, path)
-
-      destination_starts = np.cumsum([0, *lengths[:-1]], dtype=np.int64).tolist()
-      total_frames = sum(lengths)
-      packed = {}
-      packed_shapes: dict[str, tuple[int, ...]] | None = None
-
-      for physical_path, indices in physical_groups.items():
-        path = load_paths[physical_path]
-        arrays, _ = _load_motion_arrays(path, load_fps=False)
-        source_frames = int(arrays["joint_pos"].shape[0])
-        selected_shapes = _selected_shapes(arrays, len(body_idx_np))
-        if packed_shapes is None:
-          packed_shapes = selected_shapes
-          packed = {
-            key: torch.empty((total_frames, *shape), dtype=torch.float32)
-            for key, shape in packed_shapes.items()
-          }
-        elif selected_shapes != packed_shapes:
-          raise ValueError(
-            f"{path} motion array shapes {selected_shapes} do not match the first "
-            f"physical motion file's shapes {packed_shapes}."
-          )
-
-        for i in indices:
-          frame_start = frame_starts[i]
-          n = lengths[i]
-          if frame_start + n > source_frames:
-            raise ValueError(
-              f"{path} frame range [{frame_start}, {frame_start + n}) exceeds "
-              f"the source length of {source_frames} frames."
-            )
-          destination_start = destination_starts[i]
-          _copy_range_into(
-            packed,
-            arrays,
-            slice(frame_start, frame_start + n),
-            slice(destination_start, destination_start + n),
-            body_idx_np,
-          )
-        del arrays
-
-      if packed_shapes is None:
-        raise RuntimeError("Internal error: no manifest motion files were packed.")
 
     self.clips: list[ClipInfo] = infos
     self.num_clips = len(infos)
@@ -299,11 +333,29 @@ class MotionLibrary:
     self.body_ang_vel_w = packed["body_ang_vel_w"].to(device)
 
     self.clip_len = torch.tensor(lengths, dtype=torch.long, device=device)
-    self.clip_start = torch.zeros(self.num_clips, dtype=torch.long, device=device)
-    self.clip_start[1:] = torch.cumsum(self.clip_len, 0)[:-1]
-    self.total_frames = int(self.clip_len.sum().item())
+    self.clip_start = torch.tensor(
+      [
+        physical_starts[physical_path] + frame_start
+        for physical_path, frame_start in zip(
+          logical_physical_paths, frame_starts, strict=True
+        )
+      ],
+      dtype=torch.long,
+      device=device,
+    )
+    self.clip_read_start = torch.tensor(
+      [physical_starts[path] for path in logical_physical_paths],
+      dtype=torch.long,
+      device=device,
+    )
+    self.clip_read_len = torch.tensor(
+      [source_lengths[path] for path in logical_physical_paths],
+      dtype=torch.long,
+      device=device,
+    )
+    self.total_frames = packed_total_frames
 
-    fps_values = {info.fps for info in self.clips}
+    fps_values = set(source_fps_by_path.values())
     if len(fps_values) > 1:
       raise ValueError(
         f"Clips have mixed frame rates {sorted(fps_values)}. Resample them to a "
@@ -341,7 +393,19 @@ class MotionLibrary:
   def window_index(
     self, motion_ids: torch.Tensor, local_steps: torch.Tensor, offsets: torch.Tensor
   ) -> torch.Tensor:
-    """Global rows for a temporal window around each env's current frame.
+    """Global rows for a temporal window, clamped at physical-sequence endpoints.
+
+    This compatibility wrapper discards the validity mask. New observation terms
+    should call :meth:`window_index_and_mask` so a repeated endpoint cannot be
+    mistaken for a genuinely stationary reference.
+    """
+    indices, _ = self.window_index_and_mask(motion_ids, local_steps, offsets)
+    return indices
+
+  def window_index_and_mask(
+    self, motion_ids: torch.Tensor, local_steps: torch.Tensor, offsets: torch.Tensor
+  ) -> tuple[torch.Tensor, torch.Tensor]:
+    """Global rows and parent-bound validity for a temporal reference window.
 
     Args:
       motion_ids: ``(N,)`` clip id per environment.
@@ -349,13 +413,20 @@ class MotionLibrary:
       offsets: ``(W,)`` relative frame offsets, e.g. ``arange(-L, L + 1)``.
 
     Returns:
-      ``(N, W)`` global row indices, clamped to each clip's own bounds so the
-      window never bleeds into a neighbouring clip.
+      A pair of ``(N, W)`` tensors: global row indices clamped to the physical
+      parent sequence, and a boolean mask which is false only where an offset
+      crossed a real parent-sequence endpoint. Logical fragment boundaries do not
+      invalidate context; Stage-II fragments are views over their parent motion.
     """
-    local = local_steps[:, None] + offsets[None, :]
-    upper = (self.clip_len[motion_ids] - 1)[:, None]
-    local = torch.clamp(local, torch.zeros_like(upper), upper)
-    return self.clip_start[motion_ids][:, None] + local
+    index = (
+      self.clip_start[motion_ids][:, None]
+      + local_steps[:, None]
+      + offsets[None, :]
+    )
+    lower = self.clip_read_start[motion_ids][:, None]
+    upper = lower + self.clip_read_len[motion_ids][:, None] - 1
+    valid = (index >= lower) & (index <= upper)
+    return torch.clamp(index, lower, upper), valid
 
   def bin_of(self, motion_ids: torch.Tensor, local_steps: torch.Tensor) -> torch.Tensor:
     """Difficulty-bin index within the clip for each env."""
@@ -383,10 +454,11 @@ class MotionLibrary:
     """Build from a manifest written by ``ex_grmt.scripts.prepare_motions``.
 
     The manifest is ``{"clips": [{"name","source","path","num_frames","fps",\
-    "frame_start"}, ...]}``. ``frame_start`` is optional and defaults to zero;
-    together with ``num_frames`` it identifies a continuous logical clip within the
-    referenced npz. Multiple entries may therefore reference disjoint ranges of the
-    same full-sequence npz.
+    "frame_start","frame_stop"}, ...]}``. ``frame_start`` is optional and defaults
+    to zero; together with ``num_frames`` it identifies a continuous logical clip
+    within the referenced npz. When present, ``frame_stop`` must equal
+    ``frame_start + num_frames``. Multiple entries may therefore reference disjoint
+    ranges of the same full-sequence npz while sharing its readable parent context.
     ``subset`` optionally restricts to a set of clip names (order is preserved from
     the manifest, not from ``subset``).
     """
@@ -412,6 +484,11 @@ class MotionLibrary:
         # relocatable between the dev box and the cluster.
         path = (root / path).resolve()
       files.append(path)
+      frame_stop = (
+        _manifest_int(e["frame_stop"], "frame_stop", path)
+        if "frame_stop" in e
+        else None
+      )
       infos.append(
         ClipInfo(
           name=e["name"],
@@ -420,6 +497,7 @@ class MotionLibrary:
           num_frames=_manifest_int(e["num_frames"], "num_frames", path),
           fps=float(e.get("fps", 50.0)),
           frame_start=_manifest_int(e.get("frame_start", 0), "frame_start", path),
+          frame_stop=frame_stop,
         )
       )
 

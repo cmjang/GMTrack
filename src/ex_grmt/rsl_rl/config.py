@@ -45,6 +45,24 @@ class ExGRMTActorCfg(RslRlModelCfg):
   """Per-reference-token width: 38 normally, 44 with heading closed-loop input."""
   command_encoder_hidden: Tuple[int, ...] = (128,)
   """``f_g`` hidden widths after the configurable command-token input."""
+  use_command_valid_mask: bool = False
+  """Mask boundary-clamped command tokens in the causal actor's cross-attention."""
+  use_history_valid_mask: bool = False
+  """Mask synthetic proprio/action history slots after episode reset."""
+  command_window_offsets: Tuple[int, ...] | None = None
+  """Exact actor reference offsets used by offset-aware sinusoidal encoding.
+
+  ``None`` preserves the legacy slot-index encoding bit-for-bit. Causal tasks must
+  provide the exact non-uniform layout so timing cannot be inferred from slot rank.
+  """
+  use_intent_aux: bool = False
+  """Enable the training-only stochastic intent/future reconstruction branch."""
+  intent_latent_dim: int = 64
+  """Gaussian intent width; 64 follows DAJI (arXiv:2605.14417)."""
+  future_reconstruction_offsets: Tuple[int, ...] = ()
+  """Sparse prediction horizons; causal tasks use TeleGate's (+5,+10,+20)."""
+  intent_hidden_dims: Tuple[int, ...] = (128,)
+  """Local posterior/decoder MLP widths; configurable engineering choice."""
   encoder_activation: str = "elu"
   num_heads: int = 4
   """ASSUMPTION: attention head count is not stated in the paper."""
@@ -84,6 +102,10 @@ class PacePpoAlgorithmCfg(RslRlPpoAlgorithmCfg):
 
   base_checkpoint: str | None = None
   """Stage-I checkpoint. Supplies both the pi_theta warm start and the frozen pi_ref."""
+  intent_reconstruction_coef: float = 0.0
+  """Future reconstruction weight; TeleGate publishes 0.5."""
+  intent_kl_coef: float = 0.0
+  """Gaussian KL weight; TeleGate publishes 0.0005."""
 
 
 @dataclass

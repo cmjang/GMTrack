@@ -10,9 +10,14 @@ from ex_grmt.rsl_rl.fsq import FSQ, SONIC_PROXY_FSQ_LEVELS
 from ex_grmt.rsl_rl.models import (
   ACTION_HIST,
   COMMAND_WINDOW,
+  FUTURE_RECONSTRUCTION_TARGET,
+  FUTURE_RECONSTRUCTION_VALID_MASK,
+  HISTORY_VALID_MASK,
+  PAST_VALID_MASK,
   PROPRIO_HIST,
   ExGRMTActor,
   sinusoidal_positional_encoding,
+  sinusoidal_positional_encoding_at,
 )
 
 H = 10
@@ -30,31 +35,46 @@ DIST_CFG = {
 }
 
 
-def _obs(batch: int = BATCH) -> TensorDict:
-  return TensorDict(
-    {
-      PROPRIO_HIST: torch.randn(batch, H * PROPRIO_DIM),
-      ACTION_HIST: torch.randn(batch, H * ACTION_DIM),
-      COMMAND_WINDOW: torch.randn(batch, TOKENS * TOKEN_DIM),
-    },
-    batch_size=[batch],
-  )
+def _obs(
+  batch: int = BATCH, tokens: int = TOKENS, with_valid_mask: bool = False
+) -> TensorDict:
+  values = {
+    PROPRIO_HIST: torch.randn(batch, H * PROPRIO_DIM),
+    ACTION_HIST: torch.randn(batch, H * ACTION_DIM),
+    COMMAND_WINDOW: torch.randn(batch, tokens * TOKEN_DIM),
+  }
+  if with_valid_mask:
+    values[HISTORY_VALID_MASK] = torch.ones(batch, H, dtype=torch.bool)
+    values[PAST_VALID_MASK] = torch.ones(batch, tokens, dtype=torch.bool)
+  return TensorDict(values, batch_size=[batch])
 
 
-def _groups() -> dict[str, list[str]]:
-  return {"actor": [PROPRIO_HIST, ACTION_HIST, COMMAND_WINDOW]}
+def _groups(with_valid_mask: bool = False) -> dict[str, list[str]]:
+  groups = [PROPRIO_HIST, ACTION_HIST, COMMAND_WINDOW]
+  if with_valid_mask:
+    groups.append(HISTORY_VALID_MASK)
+    groups.append(PAST_VALID_MASK)
+  return {"actor": groups}
 
 
-def _actor(**kw) -> ExGRMTActor:
+def _actor(
+  command_tokens: int = TOKENS,
+  use_command_valid_mask: bool = False,
+  **kw,
+) -> ExGRMTActor:
   return ExGRMTActor(
-    obs=_obs(),
-    obs_groups=_groups(),
+    obs=_obs(
+      tokens=command_tokens, with_valid_mask=use_command_valid_mask
+    ),
+    obs_groups=_groups(use_command_valid_mask),
     obs_set="actor",
     output_dim=ACTION_DIM,
     hidden_dims=(64, 64),  # Small trunk keeps the test fast; shape logic is unchanged.
     distribution_cfg=dict(DIST_CFG),
     history_length=H,
     proprio_term_dims=TERM_DIMS,
+    use_command_valid_mask=use_command_valid_mask,
+    use_history_valid_mask=use_command_valid_mask,
     **kw,
   )
 
@@ -168,10 +188,129 @@ def test_positional_encodings_are_fixed_sinusoidal_buffers():
   assert "command_pos" not in actor.state_dict()
 
 
+def test_mask_does_not_change_parameters_so_checkpoint_needs_schema_guard():
+  """The module state alone cannot distinguish symmetric and causal semantics."""
+  baseline = _actor()
+  causal = _actor(
+    use_command_valid_mask=True,
+    command_window_offsets=tuple(range(-20, 1)),
+  )
+
+  baseline_shapes = {
+    name: value.shape for name, value in baseline.state_dict().items()
+  }
+  causal_shapes = {name: value.shape for name, value in causal.state_dict().items()}
+  assert causal_shapes == baseline_shapes
+  causal.load_state_dict(baseline.state_dict(), strict=True)
+
+  assert "command_pos" not in baseline.state_dict()
+  assert "command_pos" not in causal.state_dict()
+
+
+def test_causal_mask_excludes_boundary_clamped_tokens_from_cross_attention():
+  actor = _actor(use_command_valid_mask=True)
+  actor.eval()
+  obs = _obs(with_valid_mask=True)
+  obs[PAST_VALID_MASK][:, :10] = False
+  expected = actor(obs)
+
+  changed = obs.clone()
+  command = changed[COMMAND_WINDOW].view(BATCH, TOKENS, TOKEN_DIM)
+  command[:, :10] += 1.0e6
+  torch.testing.assert_close(actor(changed), expected)
+
+
+def test_causal_export_exposes_bool_validity_mask():
+  actor = _actor(use_command_valid_mask=True)
+  exported = actor.as_onnx()
+  dummy = exported.get_dummy_inputs()
+
+  assert exported.input_names == [
+    PROPRIO_HIST,
+    ACTION_HIST,
+    COMMAND_WINDOW,
+    HISTORY_VALID_MASK,
+    PAST_VALID_MASK,
+  ]
+  assert len(dummy) == 5
+  assert dummy[-2].dtype is torch.bool
+  assert dummy[-1].dtype is torch.bool
+  assert exported(*dummy).shape == (1, ACTION_DIM)
+
+
 def test_sinusoidal_encoding_supports_odd_dimensions():
   pe = sinusoidal_positional_encoding(length=3, dim=5)
   assert pe.shape == (1, 3, 5)
   assert torch.equal(pe[0, 0], torch.tensor([0.0, 1.0, 0.0, 1.0, 0.0]))
+
+
+def test_nonuniform_command_encoding_uses_normalized_actual_offsets():
+  offsets = (-32, -24, -16, -12, -8, -6, -4, -3, -2, -1, 0)
+  actor = _actor(
+    command_tokens=len(offsets),
+    use_command_valid_mask=True,
+    command_window_offsets=offsets,
+  )
+  expected = sinusoidal_positional_encoding_at(
+    torch.tensor(offsets, dtype=torch.float32) / 32.0,
+    actor.token_dim,
+  )
+  torch.testing.assert_close(actor.command_pos, expected)
+  assert not torch.equal(
+    actor.command_pos,
+    sinusoidal_positional_encoding(len(offsets), actor.token_dim),
+  )
+
+
+def test_intent_auxiliary_reconstructs_only_valid_future_targets():
+  offsets = (-32, -24, -16, -12, -8, -6, -4, -3, -2, -1, 0)
+  future_offsets = (5, 10, 20)
+  actor = _actor(
+    command_tokens=len(offsets),
+    use_command_valid_mask=True,
+    command_window_offsets=offsets,
+    use_intent_aux=True,
+    future_reconstruction_offsets=future_offsets,
+  )
+  obs = _obs(tokens=len(offsets), with_valid_mask=True)
+  obs[FUTURE_RECONSTRUCTION_TARGET] = torch.randn(
+    BATCH, len(future_offsets) * TOKEN_DIM
+  )
+  valid = torch.ones(BATCH, len(future_offsets), dtype=torch.bool)
+  valid[0] = False
+  obs[FUTURE_RECONSTRUCTION_VALID_MASK] = valid
+
+  reconstruction, kl, valid_counts = actor.auxiliary_future_losses(obs)
+  assert reconstruction.shape == kl.shape == valid_counts.shape == (BATCH,)
+  assert reconstruction[0] == 0.0
+  assert valid_counts.tolist()[0] == 0
+  (reconstruction[1:].mean() + 0.0005 * kl.mean()).backward()
+  named = dict(actor.named_parameters())
+  assert named["intent_posterior.0.weight"].grad is not None
+  assert named["future_decoder.0.weight"].grad is not None
+  assert named["command_enc.0.weight"].grad is not None
+
+
+def test_intent_auxiliary_is_not_an_export_input():
+  offsets = (-32, -24, -16, -12, -8, -6, -4, -3, -2, -1, 0)
+  actor = _actor(
+    command_tokens=len(offsets),
+    use_command_valid_mask=True,
+    command_window_offsets=offsets,
+    use_intent_aux=True,
+    future_reconstruction_offsets=(5, 10, 20),
+  )
+  exported = actor.as_onnx()
+  assert exported.input_names == [
+    PROPRIO_HIST,
+    ACTION_HIST,
+    COMMAND_WINDOW,
+    HISTORY_VALID_MASK,
+    PAST_VALID_MASK,
+  ]
+  assert FUTURE_RECONSTRUCTION_TARGET not in exported.input_names
+  assert FUTURE_RECONSTRUCTION_VALID_MASK not in exported.input_names
+  assert exported(*exported.get_dummy_inputs()).shape == (1, ACTION_DIM)
 
 
 def test_export_survives_a_backward_pass():

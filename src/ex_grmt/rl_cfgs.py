@@ -8,6 +8,10 @@ from __future__ import annotations
 
 from mjlab.rl import RslRlModelCfg
 
+from ex_grmt.envs.env_cfg import (
+  CAUSAL_ACTOR_WINDOW_OFFSETS,
+  CAUSAL_RECONSTRUCTION_OFFSETS,
+)
 from ex_grmt.rsl_rl.config import (
   ExGRMTActorCfg,
   ExGRMTRunnerCfg,
@@ -41,6 +45,10 @@ BETA = 0.99
 RHO_TOPK = 0.05
 RHO_STAR = 0.25
 
+# TeleGate (arXiv:2602.09628) public auxiliary-objective weights.
+INTENT_RECONSTRUCTION_COEF = 0.5
+INTENT_KL_COEF = 0.0005
+
 
 def _actor(**overrides) -> ExGRMTActorCfg:
   return ExGRMTActorCfg(
@@ -64,8 +72,40 @@ def _critic() -> RslRlModelCfg:
   )
 
 
+def _with_causal_observation_groups(
+  cfg: ExGRMTRunnerCfg, causal_online: bool
+) -> ExGRMTRunnerCfg:
+  """Install the causal actor and history-conditioned privileged critic ABI."""
+  if causal_online:
+    cfg.obs_groups["actor"] = (
+      "proprio_hist",
+      "action_hist",
+      "command_window",
+      "history_valid_mask",
+      "past_valid_mask",
+    )
+    # V(h, s, g_future, mask): retaining actor-visible history avoids the biased
+    # state-only critic for a history-dependent policy described by Baisero & Amato
+    # (arXiv:2105.11674) and matches the actor-observation-plus-privilege form in
+    # Informed Asymmetric Actor-Critic (arXiv:2509.26000). GigaBrain-WBC-0.5
+    # (arXiv:2608.18234) provides the concrete humanoid precedent: future reference
+    # plus 10-frame proprio/action history. Future reference is training-only.
+    cfg.obs_groups["critic"] = (
+      "proprio_hist",
+      "action_hist",
+      "history_valid_mask",
+      "critic",
+      "command_future_window",
+      "future_valid_mask",
+    )
+  return cfg
+
+
 def stage1_runner_cfg(
-  *, heading_closed_loop: bool = False, experiment_name: str | None = None
+  *,
+  heading_closed_loop: bool = False,
+  experiment_name: str | None = None,
+  causal_online: bool = False,
 ) -> ExGRMTRunnerCfg:
   """Stage I: generalist base policy ``pi_base`` over the full motion distribution.
 
@@ -74,19 +114,41 @@ def stage1_runner_cfg(
 
   Args:
     heading_closed_loop: Append the 6D root-orientation error to every command token.
+    causal_online: Enable the offset-aware sparse causal actor, intent auxiliary
+      objective, and history-conditioned future-privileged critic.
   """
-  return ExGRMTRunnerCfg(
-    actor=_actor(command_token_dim=44 if heading_closed_loop else 38),
+  return _with_causal_observation_groups(ExGRMTRunnerCfg(
+    actor=_actor(
+      command_token_dim=44 if heading_closed_loop else 38,
+      use_command_valid_mask=causal_online,
+      use_history_valid_mask=causal_online,
+      command_window_offsets=(
+        CAUSAL_ACTOR_WINDOW_OFFSETS if causal_online else None
+      ),
+      use_intent_aux=causal_online,
+      intent_latent_dim=64,
+      future_reconstruction_offsets=(
+        CAUSAL_RECONSTRUCTION_OFFSETS if causal_online else ()
+      ),
+    ),
     critic=_critic(),
     algorithm=PacePpoAlgorithmCfg(
       acquisition_fraction=None,
       consolidation_enabled=False,
       use_star=False,
+      intent_reconstruction_coef=(
+        INTENT_RECONSTRUCTION_COEF if causal_online else 0.0
+      ),
+      intent_kl_coef=INTENT_KL_COEF if causal_online else 0.0,
       **_PPO,
     ),
     experiment_name=(
       experiment_name
       if experiment_name is not None
+      else "ex_grmt_stage1_causal_heading"
+      if causal_online and heading_closed_loop
+      else "ex_grmt_stage1_causal"
+      if causal_online
       else "ex_grmt_stage1_heading"
       if heading_closed_loop
       else "ex_grmt_stage1"
@@ -98,7 +160,7 @@ def stage1_runner_cfg(
     max_iterations=100_000,
     save_interval=500,
     logger="tensorboard",
-  )
+  ), causal_online)
 
 
 def stage2_runner_cfg(
@@ -108,6 +170,7 @@ def stage2_runner_cfg(
   fixed_lambda_con: float | None = None,
   experiment_name: str | None = None,
   heading_closed_loop: bool = False,
+  causal_online: bool = False,
 ) -> ExGRMTRunnerCfg:
   """Stage II: PACE + STAR expansion toward highly dynamic skills.
 
@@ -120,9 +183,23 @@ def stage2_runner_cfg(
     experiment_name: Optional explicit run family. When omitted, heading and
       open-loop policies receive distinct default names.
     heading_closed_loop: Append the 6D root-orientation error to every command token.
+    causal_online: Enable the offset-aware sparse causal actor, intent auxiliary
+      objective, and history-conditioned future-privileged critic.
   """
-  return ExGRMTRunnerCfg(
-    actor=_actor(command_token_dim=44 if heading_closed_loop else 38),
+  return _with_causal_observation_groups(ExGRMTRunnerCfg(
+    actor=_actor(
+      command_token_dim=44 if heading_closed_loop else 38,
+      use_command_valid_mask=causal_online,
+      use_history_valid_mask=causal_online,
+      command_window_offsets=(
+        CAUSAL_ACTOR_WINDOW_OFFSETS if causal_online else None
+      ),
+      use_intent_aux=causal_online,
+      intent_latent_dim=64,
+      future_reconstruction_offsets=(
+        CAUSAL_RECONSTRUCTION_OFFSETS if causal_online else ()
+      ),
+    ),
     critic=_critic(),
     algorithm=PacePpoAlgorithmCfg(
       acquisition_fraction=ACQUISITION_FRACTION,
@@ -136,11 +213,19 @@ def stage2_runner_cfg(
       rho_topk=RHO_TOPK,
       rho_star=RHO_STAR,
       base_checkpoint=base_checkpoint,
+      intent_reconstruction_coef=(
+        INTENT_RECONSTRUCTION_COEF if causal_online else 0.0
+      ),
+      intent_kl_coef=INTENT_KL_COEF if causal_online else 0.0,
       **_PPO,
     ),
     experiment_name=(
       experiment_name
       if experiment_name is not None
+      else "ex_grmt_stage2_causal_heading"
+      if causal_online and heading_closed_loop
+      else "ex_grmt_stage2_causal"
+      if causal_online
       else "ex_grmt_stage2_heading"
       if heading_closed_loop
       else "ex_grmt_stage2"
@@ -149,7 +234,7 @@ def stage2_runner_cfg(
     max_iterations=50_000,
     save_interval=500,
     logger="tensorboard",
-  )
+  ), causal_online)
 
 
 def finetune_runner_cfg(base_checkpoint: str | None = None) -> ExGRMTRunnerCfg:

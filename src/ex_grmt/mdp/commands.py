@@ -98,6 +98,9 @@ class MultiMotionCommand(CommandTerm):
 
   def __init__(self, cfg: MultiMotionCommandCfg, env: ManagerBasedRlEnv):
     super().__init__(cfg, env)
+    actor_offsets = _parse_window_offsets(cfg)
+    critic_offsets = _parse_critic_window_offsets(cfg)
+    reconstruction_offsets = _parse_reconstruction_window_offsets(cfg)
 
     if cfg.require_v1_stratification:
       if (
@@ -203,11 +206,14 @@ class MultiMotionCommand(CommandTerm):
 
     self._setup_roles()
 
-    self.window_offsets = torch.arange(
-      -cfg.command_window_radius,
-      cfg.command_window_radius + 1,
-      device=self.device,
-      dtype=torch.long,
+    self.window_offsets = torch.tensor(
+      actor_offsets, device=self.device, dtype=torch.long
+    )
+    self.critic_window_offsets = torch.tensor(
+      critic_offsets, device=self.device, dtype=torch.long
+    )
+    self.reconstruction_window_offsets = torch.tensor(
+      reconstruction_offsets, device=self.device, dtype=torch.long
     )
     self.num_window_tokens = int(self.window_offsets.numel())
     self.command_token_dim = (
@@ -401,25 +407,12 @@ class MultiMotionCommand(CommandTerm):
 
   # -- Extreme-RGMT specific outputs ----------------------------------------
 
-  def command_window(self) -> torch.Tensor:
-    """Local reference window, shape ``(N, 2L+1, 9 + J [+ 6])``.
+  def _tokens_at(self, idx: torch.Tensor) -> torch.Tensor:
+    """Build reference tokens at packed-library frame indices.
 
-    Each token is ``[v_ref, w_ref, g_ref, q_ref]`` (paper Eq. 2). Linear and angular
-    velocities and the gravity direction are expressed **in the reference root frame
-    at that token's own timestamp**, which makes every token a self-contained
-    egocentric description of the reference and keeps the window invariant to where
-    the clip happens to sit in world coordinates.
-
-    Frames outside the clip are clamped to its first/last frame rather than wrapped,
-    so the window never bleeds into a neighbouring clip.
-
-    With ``heading_closed_loop=True``, each token additionally ends in the SONIC-style
-    six-dimensional relative root orientation
-    ``R(q_robot_current^-1 * q_ref_token)[:, :2]``. The robot pelvis orientation is
-    current feedback shared by every token; the reference orientation comes from
-    that token's (possibly boundary-clamped) timestamp.
+    This is shared by the actor and privileged-critic windows so their reference
+    frames use exactly the same egocentric convention.
     """
-    idx = self.lib.window_index(self.motion_ids, self.time_steps, self.window_offsets)
     n, w = idx.shape
     flat = idx.reshape(-1)
 
@@ -437,7 +430,105 @@ class MultiMotionCommand(CommandTerm):
       )
       token_parts.append(relative_root_orientation_6d(robot_root_quat, quat))
 
-    return torch.cat(token_parts, dim=-1).view(n, w, -1)
+    return torch.cat(token_parts, dim=-1).view(n, w, self.command_token_dim)
+
+  def command_window(self) -> torch.Tensor:
+    """Actor reference window, shape (N, W_actor, 9 + J [+ 6]).
+
+    Each token is ``[v_ref, w_ref, g_ref, q_ref]`` (paper Eq. 2). Linear and angular
+    velocities and the gravity direction are expressed **in the reference root frame
+    at that token's own timestamp**, which makes every token a self-contained
+    egocentric description of the reference and keeps the window invariant to where
+    the clip happens to sit in world coordinates.
+
+    Logical Stage-II fragments are views into their complete parent sequence, so
+    offsets may read genuine context outside the sampleable fragment. Only offsets
+    beyond the physical parent sequence are clamped; :meth:`command_window_valid_mask`
+    identifies those padded tokens.
+
+    With ``heading_closed_loop=True``, each token additionally ends in the SONIC-style
+    six-dimensional relative root orientation
+    ``R(q_robot_current^-1 * q_ref_token)[:, :2]``. The robot pelvis orientation is
+    current feedback shared by every token; the reference orientation comes from
+    that token's (possibly boundary-clamped) timestamp.
+
+    Explicit offsets support a near-dense/far-sparse causal layout inspired by DAJI
+    (arXiv:2605.14417) and TeleGate (arXiv:2602.09628). The default radius still
+    resolves to the dense symmetric window used by existing tasks.
+    """
+    idx = self.lib.window_index(self.motion_ids, self.time_steps, self.window_offsets)
+    return self._tokens_at(idx)
+
+  def command_window_valid_mask(self) -> torch.Tensor:
+    """Return one validity bit per actor command token, shape (N, W_actor).
+
+    The mask is relative to the physical parent sequence, not a Stage-II logical
+    fragment. It therefore marks only true sequence-end padding and reveals neither
+    the fragment boundary nor a time-to-reset countdown. At a physical sequence
+    start it also gives the actor an explicit cold-start signal instead of pretending
+    repeated first frames are executed history.
+    """
+    _, valid = self.lib.window_index_and_mask(
+      self.motion_ids, self.time_steps, self.window_offsets
+    )
+    return valid
+
+  def critic_command_window(self) -> torch.Tensor:
+    """Privileged future reference tokens, shape ``(N, W_critic, C)``.
+
+    The asymmetric critic receives exact positive offsets during training only. Its
+    history inputs remain alongside this window so the value is ``V(h, s, g_future)``
+    rather than a state-only critic for a history-dependent policy, following
+    Baisero & Amato (arXiv:2105.11674) and Informed Asymmetric Actor-Critic
+    (arXiv:2509.26000). GigaBrain-WBC-0.5 (arXiv:2608.18234) likewise combines
+    multi-frame future reference with proprioceptive/action history for its critic.
+    """
+    if self.critic_window_offsets.numel() == 0:
+      raise ValueError(
+        "critic_command_window requires non-empty critic_window_offsets."
+      )
+    idx = self.lib.window_index(
+      self.motion_ids, self.time_steps, self.critic_window_offsets
+    )
+    return self._tokens_at(idx)
+
+  def critic_command_window_valid_mask(self) -> torch.Tensor:
+    """Validity bits for privileged future tokens at physical sequence ends."""
+    if self.critic_window_offsets.numel() == 0:
+      raise ValueError(
+        "critic_command_window_valid_mask requires critic_window_offsets."
+      )
+    _, valid = self.lib.window_index_and_mask(
+      self.motion_ids, self.time_steps, self.critic_window_offsets
+    )
+    return valid
+
+  def reconstruction_command_window(self) -> torch.Tensor:
+    """Training target at sparse future offsets, shape ``(N, W_recon, C)``.
+
+    TeleGate (arXiv:2602.09628) uses the ``(+5, +10, +20)`` prediction layout.
+    This target is consumed only by the causal actor's auxiliary reconstruction loss
+    and is not an actor observation or an exported deployment input.
+    """
+    if self.reconstruction_window_offsets.numel() == 0:
+      raise ValueError(
+        "reconstruction_command_window requires reconstruction_window_offsets."
+      )
+    idx = self.lib.window_index(
+      self.motion_ids, self.time_steps, self.reconstruction_window_offsets
+    )
+    return self._tokens_at(idx)
+
+  def reconstruction_command_window_valid_mask(self) -> torch.Tensor:
+    """Validity bits for sparse auxiliary targets at parent-sequence ends."""
+    if self.reconstruction_window_offsets.numel() == 0:
+      raise ValueError(
+        "reconstruction_command_window_valid_mask requires reconstruction offsets."
+      )
+    _, valid = self.lib.window_index_and_mask(
+      self.motion_ids, self.time_steps, self.reconstruction_window_offsets
+    )
+    return valid
 
   def star_meta(self) -> torch.Tensor:
     """``(N, 2)`` of ``[difficulty weight w_t, flat bin id]`` for STAR.
@@ -960,6 +1051,80 @@ def _read_clip_names(spec: str | Path | list[str] | None) -> list[str] | None:
   return [c["name"] if isinstance(c, dict) else c for c in payload]
 
 
+def _parse_window_offsets(
+  cfg: MultiMotionCommandCfg,
+) -> tuple[int, ...]:
+  """Validate and resolve actor command-window offsets.
+
+  Explicit actor offsets override command_window_radius. Invalid layouts fail at
+  command construction instead of being sorted, clamped, or coerced, because a
+  silent correction could leak future frames into an online actor.
+  """
+  offsets = (
+    tuple(range(-cfg.command_window_radius, cfg.command_window_radius + 1))
+    if cfg.command_window_offsets is None
+    else cfg.command_window_offsets
+  )
+  if any(not isinstance(offset, int) or isinstance(offset, bool) for offset in offsets):
+    raise TypeError(
+      f"command_window_offsets must contain only integer offsets, got {offsets}."
+    )
+  if any(
+    left >= right for left, right in zip(offsets, offsets[1:], strict=False)
+  ):
+    raise ValueError(
+      f"command_window_offsets must be strictly increasing, got {offsets}."
+    )
+  if 0 not in offsets:
+    raise ValueError(
+      "command_window_offsets must contain offset 0 for the current reference frame, "
+      f"got {offsets}."
+    )
+  if cfg.require_causal_window and any(offset > 0 for offset in offsets):
+    raise ValueError(
+      "require_causal_window=True forbids future actor references, got "
+      f"command_window_offsets={offsets}."
+    )
+  return offsets
+
+
+def _parse_positive_window_offsets(
+  offsets: tuple[int, ...] | None, field_name: str
+) -> tuple[int, ...]:
+  """Validate a strictly increasing, future-only optional window."""
+  if offsets is None:
+    return ()
+  if not offsets:
+    raise ValueError(f"{field_name} must be non-empty when configured.")
+  if any(not isinstance(offset, int) or isinstance(offset, bool) for offset in offsets):
+    raise TypeError(f"{field_name} must contain only integer offsets, got {offsets}.")
+  if any(offset <= 0 for offset in offsets):
+    raise ValueError(f"{field_name} must contain only positive offsets, got {offsets}.")
+  if any(
+    left >= right for left, right in zip(offsets, offsets[1:], strict=False)
+  ):
+    raise ValueError(f"{field_name} must be strictly increasing, got {offsets}.")
+  return offsets
+
+
+def _parse_critic_window_offsets(
+  cfg: MultiMotionCommandCfg,
+) -> tuple[int, ...]:
+  """Resolve privileged-critic future offsets without sorting or coercion."""
+  return _parse_positive_window_offsets(
+    cfg.critic_window_offsets, "critic_window_offsets"
+  )
+
+
+def _parse_reconstruction_window_offsets(
+  cfg: MultiMotionCommandCfg,
+) -> tuple[int, ...]:
+  """Resolve auxiliary future-prediction offsets without silent correction."""
+  return _parse_positive_window_offsets(
+    cfg.reconstruction_window_offsets, "reconstruction_window_offsets"
+  )
+
+
 @dataclass(kw_only=True)
 class MultiMotionCommandCfg(CommandTermCfg):
   """Configuration for :class:`MultiMotionCommand`."""
@@ -1013,6 +1178,23 @@ class MultiMotionCommandCfg(CommandTermCfg):
 
   command_window_radius: int = 10
   """``L``. The window has ``2L + 1`` tokens; the paper uses 21, i.e. L = 10."""
+  command_window_offsets: tuple[int, ...] | None = None
+  """Explicit actor-window offsets, overriding command_window_radius.
+
+  The causal task uses a configurable near-dense/far-sparse layout inspired by DAJI
+  (arXiv:2605.14417) and TeleGate (arXiv:2602.09628). Offsets must be strictly
+  increasing and contain zero.
+  """
+  require_causal_window: bool = False
+  """Reject any positive actor offset. Enabled by online-teleoperation tasks."""
+  critic_window_offsets: tuple[int, ...] | None = None
+  """Training-only privileged future offsets; all must be positive and increasing."""
+  reconstruction_window_offsets: tuple[int, ...] | None = None
+  """Sparse future targets for the training-only intent reconstruction head.
+
+  The causal task uses ``(+5, +10, +20)`` following TeleGate
+  (arXiv:2602.09628). These targets never enter actor observations or deployment.
+  """
   heading_closed_loop: bool = False
   """Append SONIC-style closed-loop relative pelvis orientation to every token.
 

@@ -9,8 +9,44 @@ import torch
 from rsl_rl.algorithms import PPO
 from tensordict import TensorDict
 
+from ex_grmt.provenance import (
+  CHECKPOINT_OBSERVATION_SCHEMA_KEY,
+  build_observation_schema,
+)
 from ex_grmt.rsl_rl.ppo_pace import PacePPO
 from ex_grmt.rsl_rl.storage import TRACKING_FAILURES_EXTRA, StarBatch
+
+TEST_OBSERVATION_SCHEMA = build_observation_schema(
+  actor_observation_groups=["x"],
+  critic_observation_groups=["x"],
+  observation_group_widths={"x": 1},
+  command_window_offsets=[0],
+  critic_window_offsets=[],
+  reconstruction_window_offsets=[],
+  command_fps=50.0,
+  command_token_dim=1,
+  heading_closed_loop=False,
+  history_length=1,
+  proprio_term_names=["x"],
+  proprio_term_dims=[1],
+  action_dim=1,
+  use_past_valid_mask=False,
+  use_history_valid_mask=False,
+  use_future_valid_mask=False,
+  use_reconstruction_valid_mask=False,
+  command_position_encoding="legacy_sinusoidal_slot_index",
+  use_intent_aux=False,
+  intent_latent_dim=64,
+)
+
+
+def _pace(*args, **kwargs) -> PacePPO:
+  return PacePPO(
+    *args,
+    observation_schema=TEST_OBSERVATION_SCHEMA,
+    require_observation_schema=False,
+    **kwargs,
+  )
 
 
 def _bare_algorithm() -> PacePPO:
@@ -19,6 +55,8 @@ def _bare_algorithm() -> PacePPO:
   alg.is_multi_gpu = False
   alg.gpu_global_rank = 0
   alg.gpu_world_size = 1
+  alg.observation_schema = TEST_OBSERVATION_SCHEMA
+  alg.require_observation_schema = False
   return alg
 
 
@@ -30,6 +68,31 @@ def test_minibatch_normalization_uses_acquisition_only():
 
   assert normalized[:2].tolist() == pytest.approx([-0.7071068, 0.7071068])
   assert torch.count_nonzero(normalized[2:]) == 0
+
+
+def test_intent_losses_use_the_existing_acquisition_mask_only():
+  reconstruction = torch.tensor([1.0, 3.0, 1.0e6, 1.0e6])
+  kl = torch.tensor([2.0, 4.0, 1.0e6, 1.0e6])
+  valid_counts = torch.tensor([3, 2, 3, 3])
+  acq_mask = torch.tensor([True, True, False, False])
+
+  recon_loss, kl_loss, valid_mean = PacePPO._masked_intent_losses(
+    reconstruction, kl, valid_counts, acq_mask
+  )
+
+  assert recon_loss.item() == pytest.approx(2.0)
+  assert kl_loss.item() == pytest.approx(3.0)
+  assert valid_mean.item() == pytest.approx(2.5)
+
+
+def test_intent_reconstruction_rejects_an_all_invalid_acquisition_batch():
+  with pytest.raises(RuntimeError, match="no valid future"):
+    PacePPO._masked_intent_losses(
+      torch.zeros(2),
+      torch.zeros(2),
+      torch.tensor([0, 3]),
+      torch.tensor([True, False]),
+    )
 
 
 def test_lambda_uses_global_valid_counts(monkeypatch):
@@ -160,6 +223,9 @@ def test_save_includes_pace_state(monkeypatch):
 
   saved = alg.save()
   assert saved["upstream"] is True
+  assert (
+    saved[CHECKPOINT_OBSERVATION_SCHEMA_KEY] == TEST_OBSERVATION_SCHEMA
+  )
   assert saved["pace_state_dict"] == {
     "version": 1,
     "rho_bar": 0.72,
@@ -237,10 +303,10 @@ def test_unsupported_update_extensions_fail_fast():
   recurrent_actor = _TinyActor()
   recurrent_actor.is_recurrent = True
   with pytest.raises(ValueError, match="recurrent actor/critic"):
-    PacePPO(recurrent_actor, _TinyCritic(), None)  # type: ignore[arg-type]
+    _pace(recurrent_actor, _TinyCritic(), None)  # type: ignore[arg-type]
 
   with pytest.raises(ValueError, match="RND"):
-    PacePPO(
+    _pace(
       _TinyActor(),
       _TinyCritic(),
       None,  # type: ignore[arg-type]
@@ -248,7 +314,7 @@ def test_unsupported_update_extensions_fail_fast():
     )
 
   with pytest.raises(ValueError, match="symmetry"):
-    PacePPO(
+    _pace(
       _TinyActor(),
       _TinyCritic(),
       None,  # type: ignore[arg-type]
@@ -259,7 +325,7 @@ def test_unsupported_update_extensions_fail_fast():
 def test_reference_policy_is_frozen_and_initially_identical():
   actor = _TinyActor()
   critic = _TinyCritic()
-  alg = PacePPO(actor, critic, None, desired_kl=None)  # type: ignore[arg-type]
+  alg = _pace(actor, critic, None, desired_kl=None)  # type: ignore[arg-type]
   reference = _TinyActor()
   reference.load_state_dict(actor.state_dict())
   alg.attach_reference_policy(reference)
@@ -309,7 +375,7 @@ def _updated_parameters(consolidation_target: float):
     acq_mask=torch.tensor([True, True, False, False]),
   )
   storage = _OneBatchStorage(batch)
-  alg = PacePPO(
+  alg = _pace(
     actor,
     critic,
     storage,  # type: ignore[arg-type]
@@ -371,7 +437,7 @@ def test_eq15_uses_deterministic_policy_means_for_both_actors():
     old_distribution_params=(torch.zeros(4, 1), torch.ones(4, 1)),
     acq_mask=torch.tensor([True, True, False, False]),
   )
-  alg = PacePPO(
+  alg = _pace(
     actor,
     critic,
     _OneBatchStorage(batch),  # type: ignore[arg-type]
@@ -414,7 +480,7 @@ def _adaptive_update(old_mean: float, learning_rate: float) -> dict[str, float]:
     ),
     acq_mask=torch.tensor([True, True, False, False]),
   )
-  alg = PacePPO(
+  alg = _pace(
     actor,
     critic,
     _OneBatchStorage(batch),  # type: ignore[arg-type]

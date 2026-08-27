@@ -204,6 +204,64 @@ def role_noisy_motion_command_window(
   return _add_acquisition_uniform_noise(clean, magnitude, acquisition_fraction, enabled)
 
 
+def motion_command_past_valid_mask(
+  env: ManagerBasedRlEnv, command_name: str
+) -> torch.Tensor:
+  """Return true for actor-window tokens sourced from the physical sequence.
+
+  False entries are cold-start padding at a real sequence boundary. The mask provides
+  only the ambiguity bit the actor needs; it does not reveal logical fragment length
+  or time to reset.
+  """
+  return _cmd(env, command_name).command_window_valid_mask()
+
+
+def executed_history_valid_mask(
+  env: ManagerBasedRlEnv, history_length: int
+) -> torch.Tensor:
+  """Mark sensed/executed history slots since the most recent episode reset.
+
+  mjlab clears an observation group's history buffer by repeating the reset-time
+  sample, which otherwise looks like genuine stationary history. We keep the current
+  sensed state/start action valid and mark only the older synthetic slots false until
+  ``history_length`` real steps have accumulated. This exposes bounded startup age,
+  not motion-clip position or time to reset.
+  """
+  if history_length <= 0:
+    raise ValueError(f"history_length must be positive, got {history_length}.")
+  valid_count = torch.clamp(env.episode_length_buf + 1, max=history_length)
+  slots = torch.arange(history_length, device=valid_count.device)
+  return slots[None, :] >= history_length - valid_count[:, None]
+
+
+def motion_command_future_window(
+  env: ManagerBasedRlEnv, command_name: str
+) -> torch.Tensor:
+  """Flattened privileged future reference window for the training critic."""
+  return _cmd(env, command_name).critic_command_window().flatten(1)
+
+
+def motion_command_future_valid_mask(
+  env: ManagerBasedRlEnv, command_name: str
+) -> torch.Tensor:
+  """True where a privileged future token is inside the physical parent sequence."""
+  return _cmd(env, command_name).critic_command_window_valid_mask()
+
+
+def motion_command_reconstruction_target(
+  env: ManagerBasedRlEnv, command_name: str
+) -> torch.Tensor:
+  """Flattened sparse future targets for the training-only intent head."""
+  return _cmd(env, command_name).reconstruction_command_window().flatten(1)
+
+
+def motion_command_reconstruction_valid_mask(
+  env: ManagerBasedRlEnv, command_name: str
+) -> torch.Tensor:
+  """Validity bits aligned with the sparse future reconstruction targets."""
+  return _cmd(env, command_name).reconstruction_command_window_valid_mask()
+
+
 def motion_command_token(env: ManagerBasedRlEnv, command_name: str) -> torch.Tensor:
   """Current command token ``g_t = [v_ref, w_ref, g_ref, q_ref]``, shape ``(N, 38)``.
 
@@ -212,7 +270,13 @@ def motion_command_token(env: ManagerBasedRlEnv, command_name: str) -> torch.Ten
   exactly ``g_t`` (offset 0 of ``window_offsets``).
   """
   command = _cmd(env, command_name)
-  return command.command_window()[:, command.cfg.command_window_radius]
+  zero_offset = torch.nonzero(command.window_offsets == 0, as_tuple=False).flatten()
+  if zero_offset.numel() != 1:
+    raise ValueError(
+      "motion_command_token requires exactly one offset 0 in window_offsets, "
+      f"got {command.window_offsets}."
+    )
+  return command.command_window()[:, zero_offset[0]]
 
 
 def motion_ref_root_height(env: ManagerBasedRlEnv, command_name: str) -> torch.Tensor:

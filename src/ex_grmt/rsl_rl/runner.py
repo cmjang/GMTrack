@@ -8,8 +8,8 @@ Differences from mjlab's ``MotionTrackingOnPolicyRunner``:
   interface anyway. Extreme-RGMT's deployment target is *online teleoperation*, where
   the reference window arrives frame by frame from an inertial capture stream, so the
   exported policy takes the reference window as an ordinary input.
-  :class:`~ex_grmt.rsl_rl.models.ExGRMTActor` already exposes exactly the three named
-  inputs the on-robot runtime has to fill.
+  :class:`~ex_grmt.rsl_rl.models.ExGRMTActor` exposes the named inputs the on-robot
+  runtime has to fill, including a validity mask for causal-window startup padding.
 * Extra metadata is attached so the deployment side can reconstruct the observation
   layout without reading this repo.
 """
@@ -30,7 +30,6 @@ from rsl_rl.env.vec_env import VecEnv
 
 from ex_grmt.mdp.commands import MultiMotionCommand
 from ex_grmt.provenance import build_run_provenance, sha256_file, write_run_provenance
-from ex_grmt.rsl_rl.models import REQUIRED_GROUPS as ACTOR_OBS_GROUPS
 from ex_grmt.rsl_rl.storage import TRACKING_FAILURES_EXTRA
 
 
@@ -136,6 +135,7 @@ class ExGRMTOnPolicyRunner(MjlabOnPolicyRunner):
       },
       base_checkpoint=algorithm_cfg.get("base_checkpoint"),
       recovery_probability=float(cfg.recovery_probability),
+      observation_schema=self.alg.observation_schema,
     )
     write_run_provenance(Path(log_dir) / "run_provenance.json", payload)
 
@@ -312,10 +312,10 @@ class ExGRMTOnPolicyRunner(MjlabOnPolicyRunner):
     """Deployment metadata for the exported policy.
 
     mjlab's ``get_base_metadata`` cannot be reused: it hard-codes a single observation
-    group literally named ``"actor"``, whereas this policy takes three named inputs
-    (proprioceptive history, action history, reference window). The robot-level fields
-    below mirror it so downstream tooling keeps working; the observation section
-    describes our actual export interface instead.
+    group literally named ``"actor"``, whereas this policy takes separate named
+    history/reference inputs and causal policies additionally take validity masks.
+    The robot-level fields below mirror it so downstream tooling keeps working; the
+    observation section describes our actual export interface instead.
     """
     env = self.env.unwrapped
     robot: Entity = env.scene["robot"]
@@ -331,17 +331,15 @@ class ExGRMTOnPolicyRunner(MjlabOnPolicyRunner):
     damping = -env.sim.mj_model.actuator_biasprm[ctrl_ids, 2]
 
     motion = cast(MultiMotionCommand, env.command_manager.get_term("motion"))
-    actor_cfg = self.cfg.get("actor", {})
-    actor_command_token_dim = int(
-      actor_cfg.get("command_token_dim", motion.command_token_dim)
-    )
+    actor_cfg = self.cfg["actor"]
+    actor_command_token_dim = int(actor_cfg["command_token_dim"])
     if actor_command_token_dim != motion.command_token_dim:
       raise ValueError(
         "Actor/environment command-token mismatch: actor command_token_dim="
         f"{actor_command_token_dim}, environment command_token_dim="
         f"{motion.command_token_dim}."
       )
-    proprio_term_dims = list(actor_cfg.get("proprio_term_dims", ()))
+    proprio_term_dims = list(actor_cfg["proprio_term_dims"])
     if not proprio_term_dims:
       raise ValueError("Actor metadata requires non-empty proprio_term_dims.")
     command_layout = _command_token_layout(
@@ -350,6 +348,11 @@ class ExGRMTOnPolicyRunner(MjlabOnPolicyRunner):
     heading_closed_loop = command_layout[-1] == "root_ori_error[6]"
     scale = joint_action._scale
     obs_mgr = env.observation_manager
+    observation_schema = self.alg.observation_schema
+    schema = observation_schema["schema"]
+    command_schema = schema["command"]
+    history_mask_schema = schema["mask_layout"]["history_valid_mask"]
+    past_mask_schema = schema["mask_layout"]["past_valid_mask"]
 
     metadata: dict = {
       "run_path": self._run_name(),
@@ -361,16 +364,50 @@ class ExGRMTOnPolicyRunner(MjlabOnPolicyRunner):
       if isinstance(scale, torch.Tensor)
       else scale,
       "command_names": list(env.command_manager.active_terms),
-      # Export interface: three named inputs, in this order.
-      "policy_input_names": list(ACTOR_OBS_GROUPS),
-      "history_length": actor_cfg.get("history_length"),
+      "policy_input_names": schema["actor_observation_groups"],
+      "observation_schema_sha256": observation_schema["sha256"],
+      "history_length": actor_cfg["history_length"],
       "proprio_term_names": list(obs_mgr.active_terms["proprio_hist"]),
       "proprio_term_dims": proprio_term_dims,
       # Each token is egocentric in the reference root frame at its own timestamp.
       # Heading policies append the current root-orientation error and therefore
       # require a one-time deployment-frame alignment at reset.
       "command_window_radius": motion.cfg.command_window_radius,
+      "command_window_offsets": motion.window_offsets.detach().cpu().tolist(),
+      "command_window_offsets_seconds": [
+        offset / command_schema["fps"] for offset in command_schema["window_offsets"]
+      ],
       "command_window_tokens": motion.num_window_tokens,
+      "command_window_fps": command_schema["fps"],
+      "command_window_offset_unit": command_schema["offset_unit"],
+      "command_window_ordering": command_schema["ordering"],
+      "command_window_startup_fill": command_schema["startup_fill"],
+      "command_window_position_encoding": command_schema["position_encoding"],
+      "command_window_position_normalization": command_schema[
+        "position_normalization"
+      ],
+      "command_window_valid_mask_group": (
+        past_mask_schema["observation_group"]
+        if past_mask_schema is not None
+        else "none"
+      ),
+      "command_window_valid_mask_rule": (
+        f"true: {past_mask_schema['true']}; false: {past_mask_schema['false']}"
+        if past_mask_schema is not None
+        else "none"
+      ),
+      "history_valid_mask_group": (
+        history_mask_schema["observation_group"]
+        if history_mask_schema is not None
+        else "none"
+      ),
+      "history_valid_mask_rule": (
+        f"true: {history_mask_schema['true']}; false: "
+        f"{history_mask_schema['false']}"
+        if history_mask_schema is not None
+        else "none"
+      ),
+      "intent_auxiliary_exported": False,
       "command_token_dim": actor_command_token_dim,
       "command_token_layout": command_layout,
       "heading_closed_loop": heading_closed_loop,

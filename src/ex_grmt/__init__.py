@@ -76,6 +76,15 @@ def _stage1_env(play: bool = False):
   return make_ex_grmt_env_cfg(manifest=MANIFEST_STAGE1, play=play)
 
 
+def _stage1_causal_env(play: bool = False):
+  """Stage I with past-only actor commands and a future-privileged critic."""
+  return make_ex_grmt_env_cfg(
+    manifest=MANIFEST_STAGE1,
+    play=play,
+    causal_online=True,
+  )
+
+
 def _stage1_recovery_env(play: bool = False):
   """Stage I with RGMT Sec. II-D fall recovery (docs/recovery_proxy.md).
 
@@ -124,6 +133,19 @@ def _stage2_env(play: bool = False):
     acquisition_fraction=0.8,
     require_v1_stratification=True,
     play=play,
+  )
+
+
+def _stage2_causal_env(play: bool = False):
+  """Stage II PACE/STAR with the asymmetric online actor/critic observations."""
+  return make_ex_grmt_env_cfg(
+    manifest=MANIFEST_STRATIFIED,
+    acquisition_clips=MANIFEST_CHALLENGING,
+    consolidation_clips=MANIFEST_MASTERED,
+    acquisition_fraction=0.8,
+    require_v1_stratification=True,
+    play=play,
+    causal_online=True,
   )
 
 
@@ -176,6 +198,16 @@ register_mjlab_task(
 )
 
 register_mjlab_task(
+  task_id="ExGRMT-Stage1-Causal-Flat-Unitree-G1",
+  env_cfg=_stage1_causal_env(),
+  play_env_cfg=_stage1_causal_env(play=True),
+  rl_cfg=stage1_runner_cfg(
+    causal_online=True, experiment_name="ex_grmt_stage1_causal"
+  ),
+  runner_cls=ExGRMTOnPolicyRunner,
+)
+
+register_mjlab_task(
   task_id="ExGRMT-Stage1-Recovery-Flat-Unitree-G1",
   env_cfg=_stage1_recovery_env(),
   play_env_cfg=_stage1_recovery_env(play=True),
@@ -211,6 +243,16 @@ register_mjlab_task(
   env_cfg=_stage2_env(),
   play_env_cfg=_stage2_env(play=True),
   rl_cfg=stage2_runner_cfg(),
+  runner_cls=ExGRMTOnPolicyRunner,
+)
+
+register_mjlab_task(
+  task_id="ExGRMT-Stage2-Causal-Flat-Unitree-G1",
+  env_cfg=_stage2_causal_env(),
+  play_env_cfg=_stage2_causal_env(play=True),
+  rl_cfg=stage2_runner_cfg(
+    causal_online=True, experiment_name="ex_grmt_stage2_causal"
+  ),
   runner_cls=ExGRMTOnPolicyRunner,
 )
 

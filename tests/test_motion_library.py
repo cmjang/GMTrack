@@ -51,6 +51,8 @@ def test_packing_preserves_per_clip_content(library, tmp_path):
   assert library.num_clips == 3
   assert library.total_frames == 120 + 75 + 200
   assert library.clip_start.tolist() == [0, 120, 195]
+  assert library.clip_read_start.tolist() == library.clip_start.tolist()
+  assert library.clip_read_len.tolist() == library.clip_len.tolist()
 
   for i in range(3):
     raw = np.load(tmp_path / f"clip{i}.npz")
@@ -81,6 +83,11 @@ def test_window_index_clamps_within_the_clip(library):
 
   idx = library.window_index(torch.tensor([1]), torch.tensor([74]), offsets)
   assert int(idx.max()) == 194, "window ran off the end of the clip"
+
+  _, valid = library.window_index_and_mask(
+    torch.tensor([1]), torch.tensor([74]), offsets
+  )
+  assert valid.tolist() == [[True] * 11 + [False] * 10]
 
 
 def test_bins_are_one_second_wide(library):
@@ -176,15 +183,48 @@ def test_manifest_ranges_slice_one_source_into_multiple_clips(tmp_path):
   raw = np.load(source)
 
   assert lib.clip_len.tolist() == [5, 4]
-  assert lib.clip_start.tolist() == [0, 5]
+  assert lib.clip_start.tolist() == [2, 11]
+  assert lib.clip_read_start.tolist() == [0, 0]
+  assert lib.clip_read_len.tolist() == [20, 20]
+  assert lib.total_frames == 20
   assert [info.frame_start for info in lib.clips] == [2, 11]
-  assert torch.equal(lib.joint_pos[:5], torch.as_tensor(raw["joint_pos"][2:7]))
-  assert torch.equal(lib.joint_pos[5:], torch.as_tensor(raw["joint_pos"][11:15]))
+  assert torch.equal(lib.joint_pos, torch.as_tensor(raw["joint_pos"]))
   assert torch.equal(
-    lib.body_pos_w[:5], torch.as_tensor(raw["body_pos_w"][2:7][:, [1, 3]])
+    lib.body_pos_w, torch.as_tensor(raw["body_pos_w"][:, [1, 3]])
   )
-  assert torch.equal(
-    lib.body_pos_w[5:], torch.as_tensor(raw["body_pos_w"][11:15][:, [1, 3]])
+
+
+def test_logical_fragment_window_reads_parent_context_and_masks_parent_ends(tmp_path):
+  source = tmp_path / "full_sequence.npz"
+  _write_clip(source, 20, seed=123)
+  manifest = tmp_path / "fragment.json"
+  manifest.write_text(
+    json.dumps(
+      {
+        "clips": [
+          {
+            "name": "middle",
+            "path": source.name,
+            "frame_start": 5,
+            "frame_stop": 10,
+            "num_frames": 5,
+            "fps": FPS,
+          }
+        ]
+      }
+    )
+  )
+  lib = MotionLibrary.from_manifest(manifest, torch.arange(NUM_BODIES))
+
+  offsets = torch.tensor([-6, -5, -1, 0, 4, 5, 14, 15])
+  idx, valid = lib.window_index_and_mask(
+    torch.tensor([0]), torch.tensor([0]), offsets
+  )
+
+  assert idx.tolist() == [[0, 0, 4, 5, 9, 10, 19, 19]]
+  assert valid.tolist() == [[False, True, True, True, True, True, True, False]]
+  assert lib.window_index(torch.tensor([0]), torch.tensor([0]), offsets).tolist() == (
+    idx.tolist()
   )
 
 
@@ -273,12 +313,15 @@ def test_nonadjacent_manifest_paths_load_once_and_preserve_order(tmp_path, monke
     "body_quat_w": 2,
     "body_lin_vel_w": 2,
     "body_ang_vel_w": 2,
+    "fps": 2,
   }
   assert [info.name for info in lib.clips] == ["first", "middle", "last"]
-  assert lib.clip_start.tolist() == [0, 5, 9]
-  assert torch.equal(lib.joint_pos[:5], torch.as_tensor(joint_a[:5]))
-  assert torch.equal(lib.joint_pos[5:9], torch.as_tensor(joint_b[3:7]))
-  assert torch.equal(lib.joint_pos[9:], torch.as_tensor(joint_a[10:15]))
+  assert lib.total_frames == 40
+  assert lib.clip_start.tolist() == [0, 23, 10]
+  assert lib.clip_read_start.tolist() == [0, 20, 0]
+  assert lib.clip_read_len.tolist() == [20, 20, 20]
+  assert torch.equal(lib.joint_pos[:20], torch.as_tensor(joint_a))
+  assert torch.equal(lib.joint_pos[20:], torch.as_tensor(joint_b))
 
 
 @pytest.mark.parametrize(
@@ -332,6 +375,31 @@ def test_manifest_rejects_non_integer_frame_range_values(tmp_path, field):
   manifest.write_text(json.dumps({"clips": [entry]}))
 
   with pytest.raises(TypeError, match=rf"{field} must be an integer"):
+    MotionLibrary.from_manifest(manifest, torch.arange(NUM_BODIES))
+
+
+def test_manifest_rejects_inconsistent_frame_stop(tmp_path):
+  source = tmp_path / "source.npz"
+  _write_clip(source, 10, seed=0)
+  manifest = tmp_path / "bad_stop.json"
+  manifest.write_text(
+    json.dumps(
+      {
+        "clips": [
+          {
+            "name": "bad",
+            "path": source.name,
+            "frame_start": 2,
+            "frame_stop": 8,
+            "num_frames": 5,
+            "fps": FPS,
+          }
+        ]
+      }
+    )
+  )
+
+  with pytest.raises(ValueError, match=r"frame_stop 8.*frame_start.*7"):
     MotionLibrary.from_manifest(manifest, torch.arange(NUM_BODIES))
 
 

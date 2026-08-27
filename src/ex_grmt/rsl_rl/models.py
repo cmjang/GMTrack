@@ -8,12 +8,16 @@ Data flow::
      + positional encoding -> pre-LN causal block -> max-pool
      -> h_t (N, 64)                       Eq. (7) / RGMT Eq. (10-11)
 
-  command window   (N, 21*C) -> f_g -> LN + p_tau -> Z^g (N, 21, 64)  Eq. (8)
+  command window   (N, W*C) -> f_g -> LN + p_tau -> Z^g (N, W, 64)  Eq. (8)
 
   u_t   = pre-LN cross block(Q = W_q h_t, K/V = Z^g)  (N, 64)
                                           Eq. (9) / RGMT Eq. (15)
   u_hat = FSQ(u_t)                                                 Eq. (10)
   a_t   = pi(o^prop_t, a_{t-1}, u_hat)                             Eq. (11)
+
+The online task evaluates ``p_tau`` at normalized physical frame offsets and adds a
+training-only diagonal-Gaussian intent/reconstruction branch. That branch shares the
+causal representation but is never called by the deterministic export wrapper.
 
 Extreme-RGMT leaves both attention blocks' internals unspecified; they come from
 RGMT (arXiv:2601.23080v1), whose Eq. 10-11 and Eq. 15 spell out pre-LN residual
@@ -51,7 +55,12 @@ from ex_grmt.rsl_rl.fsq import FSQ, SONIC_PROXY_FSQ_LEVELS
 PROPRIO_HIST = "proprio_hist"
 ACTION_HIST = "action_hist"
 COMMAND_WINDOW = "command_window"
+PAST_VALID_MASK = "past_valid_mask"
+HISTORY_VALID_MASK = "history_valid_mask"
+FUTURE_RECONSTRUCTION_TARGET = "future_reconstruction_target"
+FUTURE_RECONSTRUCTION_VALID_MASK = "future_reconstruction_valid_mask"
 REQUIRED_GROUPS = (PROPRIO_HIST, ACTION_HIST, COMMAND_WINDOW)
+MASKED_REQUIRED_GROUPS = (*REQUIRED_GROUPS, HISTORY_VALID_MASK, PAST_VALID_MASK)
 
 
 class ExGRMTActor(MLPModel):
@@ -111,6 +120,13 @@ class ExGRMTActor(MLPModel):
     fsq_token_dim: int = 32,
     unified_encoder: bool = False,
     command_token_dim: int = 38,
+    use_command_valid_mask: bool = False,
+    use_history_valid_mask: bool = False,
+    command_window_offsets: tuple[int, ...] | None = None,
+    use_intent_aux: bool = False,
+    intent_latent_dim: int = 64,
+    future_reconstruction_offsets: tuple[int, ...] = (),
+    intent_hidden_dims: tuple[int, ...] = (128,),
   ) -> None:
     # Plain attributes are safe to set before nn.Module.__init__ runs; they are
     # needed by _get_obs_dim / _get_latent_dim, both called from super().__init__.
@@ -121,6 +137,19 @@ class ExGRMTActor(MLPModel):
     self.action_dim = output_dim
     self.use_fsq = use_fsq
     self.unified_encoder = unified_encoder
+    self.use_command_valid_mask = use_command_valid_mask
+    self.use_history_valid_mask = use_history_valid_mask
+    self.command_window_offsets = (
+      None if command_window_offsets is None else tuple(command_window_offsets)
+    )
+    self.use_intent_aux = use_intent_aux
+    self.intent_latent_dim = intent_latent_dim
+    self.future_reconstruction_offsets = tuple(future_reconstruction_offsets)
+    if use_command_valid_mask != use_history_valid_mask:
+      raise ValueError(
+        "Causal actors must enable command and history validity masks together."
+      )
+    self.required_groups = MASKED_REQUIRED_GROUPS if use_command_valid_mask else REQUIRED_GROUPS
 
     if obs_normalization:
       raise ValueError(
@@ -133,6 +162,50 @@ class ExGRMTActor(MLPModel):
       )
     if command_token_dim <= 0:
       raise ValueError(f"command_token_dim must be positive, got {command_token_dim}.")
+    if self.command_window_offsets is not None:
+      offsets = self.command_window_offsets
+      if any(
+        not isinstance(offset, int) or isinstance(offset, bool) for offset in offsets
+      ):
+        raise TypeError(
+          f"command_window_offsets must contain integers, got {offsets}."
+        )
+      if any(
+        left >= right for left, right in zip(offsets, offsets[1:], strict=False)
+      ):
+        raise ValueError(
+          f"command_window_offsets must be strictly increasing, got {offsets}."
+        )
+      if 0 not in offsets:
+        raise ValueError(
+          f"command_window_offsets must contain offset 0, got {offsets}."
+        )
+    if use_intent_aux:
+      if intent_latent_dim <= 0:
+        raise ValueError(
+          f"intent_latent_dim must be positive, got {intent_latent_dim}."
+        )
+      if not self.future_reconstruction_offsets:
+        raise ValueError(
+          "use_intent_aux=True requires future_reconstruction_offsets."
+        )
+      if any(offset <= 0 for offset in self.future_reconstruction_offsets):
+        raise ValueError(
+          "future_reconstruction_offsets must contain only positive offsets, got "
+          f"{self.future_reconstruction_offsets}."
+        )
+      if any(
+        left >= right
+        for left, right in zip(
+          self.future_reconstruction_offsets,
+          self.future_reconstruction_offsets[1:],
+          strict=False,
+        )
+      ):
+        raise ValueError(
+          "future_reconstruction_offsets must be strictly increasing, got "
+          f"{self.future_reconstruction_offsets}."
+        )
 
     super().__init__(
       obs=obs,
@@ -184,11 +257,26 @@ class ExGRMTActor(MLPModel):
       sinusoidal_positional_encoding(hist_tokens, token_dim),
       persistent=False,
     )
-    self.register_buffer(
-      "command_pos",
-      sinusoidal_positional_encoding(self.num_command_tokens, token_dim),
-      persistent=False,
-    )
+    if self.command_window_offsets is None:
+      command_pos = sinusoidal_positional_encoding(
+        self.num_command_tokens, token_dim
+      )
+    else:
+      if len(self.command_window_offsets) != self.num_command_tokens:
+        raise ValueError(
+          "command_window_offsets length does not match the observed command token "
+          f"count: {len(self.command_window_offsets)} != {self.num_command_tokens}."
+        )
+      raw_offsets = torch.tensor(self.command_window_offsets, dtype=torch.float32)
+      max_abs_offset = float(raw_offsets.abs().max().item())
+      if max_abs_offset == 0.0:
+        normalized_offsets = raw_offsets
+      else:
+        normalized_offsets = raw_offsets / max_abs_offset
+      command_pos = sinusoidal_positional_encoding_at(
+        normalized_offsets, token_dim
+      )
+    self.register_buffer("command_pos", command_pos, persistent=False)
 
     # -- causal history encoder (Eq. 7; block internals per RGMT Eq. 10-11) --
     # Extreme-RGMT leaves Enc_hist unspecified and "builds on the controller design
@@ -231,6 +319,22 @@ class ExGRMTActor(MLPModel):
       else nn.Identity()
     )
 
+    self.intent_posterior: nn.Module | None = None
+    self.future_decoder: nn.Module | None = None
+    if use_intent_aux:
+      self.intent_posterior = MLP(
+        token_dim,
+        2 * intent_latent_dim,
+        list(intent_hidden_dims),
+        encoder_activation,
+      )
+      self.future_decoder = MLP(
+        intent_latent_dim,
+        len(self.future_reconstruction_offsets) * command_token_dim,
+        list(intent_hidden_dims),
+        encoder_activation,
+      )
+
     self._last_u: torch.Tensor | None = None
 
   # -- rsl-rl hooks ---------------------------------------------------------
@@ -240,9 +344,10 @@ class ExGRMTActor(MLPModel):
   ) -> tuple[list[str], int]:
     """Validate the group contract and derive per-branch dimensions."""
     active = list(obs_groups[obs_set])
-    if tuple(active) != REQUIRED_GROUPS:
+    if tuple(active) != self.required_groups:
       raise ValueError(
-        f"ExGRMTActor expects obs_groups[{obs_set!r}] == {list(REQUIRED_GROUPS)}, "
+        f"ExGRMTActor expects obs_groups[{obs_set!r}] == "
+        f"{list(self.required_groups)}, "
         f"got {active}. Order matters: dimensions are derived positionally."
       )
     for name in active:
@@ -286,8 +391,35 @@ class ExGRMTActor(MLPModel):
     self.num_command_tokens = command_flat // self.command_token_dim
     if self.num_command_tokens == 0:
       raise ValueError(f"'{COMMAND_WINDOW}' must contain at least one command token.")
+    if self.use_command_valid_mask:
+      mask = obs[PAST_VALID_MASK]
+      if mask.dtype is not torch.bool:
+        raise TypeError(
+          f"'{PAST_VALID_MASK}' must be bool, got dtype {mask.dtype}."
+        )
+      if mask.shape[-1] != self.num_command_tokens:
+        raise ValueError(
+          f"'{PAST_VALID_MASK}' is {mask.shape[-1]}-d but '{COMMAND_WINDOW}' "
+          f"contains {self.num_command_tokens} tokens."
+        )
 
-    return active, proprio_flat + action_flat + command_flat
+      history_mask = obs[HISTORY_VALID_MASK]
+      if history_mask.dtype is not torch.bool:
+        raise TypeError(
+          f"'{HISTORY_VALID_MASK}' must be bool, got dtype {history_mask.dtype}."
+        )
+      if history_mask.shape[-1] != self.history_length:
+        raise ValueError(
+          f"'{HISTORY_VALID_MASK}' is {history_mask.shape[-1]}-d but history_length "
+          f"is {self.history_length}."
+        )
+
+    mask_flat = (
+      self.num_command_tokens + self.history_length
+      if self.use_command_valid_mask
+      else 0
+    )
+    return active, proprio_flat + action_flat + command_flat + mask_flat
 
   def _get_latent_dim(self) -> int:
     """Actor trunk input: ``[o^prop_t, a_{t-1}, u_hat_t]`` (Eq. 11)."""
@@ -342,20 +474,53 @@ class ExGRMTActor(MLPModel):
 
     # -- causal history encoder (Eq. 7; pre-LN block per RGMT Eq. 10-11) --
     normed = self.hist_ln_attn(tokens)
-    attn_out, _ = self.hist_attn(
-      normed, normed, normed, attn_mask=self._causal_mask, need_weights=False
-    )
+    if self.use_history_valid_mask:
+      history_valid = obs[HISTORY_VALID_MASK]
+      token_valid = (
+        history_valid
+        if self.unified_encoder
+        else history_valid.repeat_interleave(2, dim=-1)
+      )
+      attn_out, _ = self.hist_attn(
+        normed,
+        normed,
+        normed,
+        attn_mask=self._causal_mask,
+        key_padding_mask=~token_valid,
+        need_weights=False,
+      )
+    else:
+      token_valid = None
+      attn_out, _ = self.hist_attn(
+        normed, normed, normed, attn_mask=self._causal_mask, need_weights=False
+      )
     x = tokens + attn_out
     x = x + self.hist_mlp(self.hist_ln_mlp(x))
     h_bar = self.hist_ln_out(x)
+    if token_valid is not None:
+      h_bar = h_bar.masked_fill(~token_valid[..., None], -torch.inf)
     h_t = h_bar.max(dim=1).values  # RGMT Eq. 11: element-wise max pool over time.
 
     # -- command tokens (Eq. 8) --
+    # Legacy tasks keep their original slot-index encoding. Explicit-offset tasks use
+    # the normalized physical offsets registered at construction, so exchanging two
+    # non-uniform slots changes the representation even when tensor shapes match.
     z_g = self.command_norm(self.command_enc(g_seq)) + self.command_pos
 
     # -- cross attention (Eq. 9 / RGMT Eq. 15) --
     query = self.query_proj(h_t).unsqueeze(1)  # (N, 1, D)
-    attn_out, _ = self.cross_attn(self.cross_ln_q(query), z_g, z_g, need_weights=False)
+    if self.use_command_valid_mask:
+      attn_out, _ = self.cross_attn(
+        self.cross_ln_q(query),
+        z_g,
+        z_g,
+        key_padding_mask=~obs[PAST_VALID_MASK],
+        need_weights=False,
+      )
+    else:
+      attn_out, _ = self.cross_attn(
+        self.cross_ln_q(query), z_g, z_g, need_weights=False
+      )
     s = query + attn_out
     s = s + self.cross_mlp(self.cross_ln_mlp(s))
     u_t = self.cross_ln_out(s).squeeze(1)  # (N, D)
@@ -369,6 +534,75 @@ class ExGRMTActor(MLPModel):
 
     # -- actor input (Eq. 11) --
     return torch.cat([o_seq[:, -1], a_seq[:, -1], u_hat], dim=-1)
+
+  def auxiliary_future_losses(
+    self, obs: TensorDict
+  ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Return per-row future reconstruction MSE, KL, and valid-token counts.
+
+    This training-only branch recomputes the deterministic causal actor latent, then
+    samples ``z = mu + exp(0.5 logvar) * epsilon`` and decodes the TeleGate-style
+    sparse future targets. The random latent never enters the deployed policy path;
+    it regularizes the shared causal representation through reconstruction gradients.
+    ``as_onnx()`` calls only :meth:`get_latent`, so neither target nor auxiliary head
+    appears in the exported graph.
+    """
+    if not self.use_intent_aux:
+      raise ValueError("Intent auxiliary losses are disabled for this actor.")
+    if self.intent_posterior is None or self.future_decoder is None:
+      raise RuntimeError("Intent auxiliary modules were not constructed.")
+    for group in (
+      FUTURE_RECONSTRUCTION_TARGET,
+      FUTURE_RECONSTRUCTION_VALID_MASK,
+    ):
+      if group not in obs:
+        raise KeyError(f"Intent auxiliary loss requires observation group {group!r}.")
+
+    actor_latent = self.get_latent(obs)
+    causal_intent = actor_latent[:, -self.token_dim :]
+    posterior = self.intent_posterior(causal_intent)
+    mu, logvar = posterior.chunk(2, dim=-1)
+    z = mu + torch.exp(0.5 * logvar) * torch.randn_like(mu)
+    prediction = self.future_decoder(z)
+
+    n = prediction.shape[0]
+    num_future = len(self.future_reconstruction_offsets)
+    expected_width = num_future * self.command_token_dim
+    target = obs[FUTURE_RECONSTRUCTION_TARGET]
+    if target.shape != (n, expected_width):
+      raise ValueError(
+        f"{FUTURE_RECONSTRUCTION_TARGET!r} must have shape {(n, expected_width)}, "
+        f"got {tuple(target.shape)}."
+      )
+    valid = obs[FUTURE_RECONSTRUCTION_VALID_MASK]
+    if valid.dtype is not torch.bool:
+      raise TypeError(
+        f"{FUTURE_RECONSTRUCTION_VALID_MASK!r} must be bool, got {valid.dtype}."
+      )
+    if valid.shape != (n, num_future):
+      raise ValueError(
+        f"{FUTURE_RECONSTRUCTION_VALID_MASK!r} must have shape {(n, num_future)}, "
+        f"got {tuple(valid.shape)}."
+      )
+
+    squared_error = (
+      prediction.view(n, num_future, self.command_token_dim)
+      - target.view(n, num_future, self.command_token_dim)
+    ).square()
+    valid_counts = valid.sum(dim=-1)
+    # Rows with no readable future have no reconstruction target. Return an exact
+    # zero for those rows and let PacePPO fail if an entire acquisition batch lacks a
+    # valid target, rather than silently disabling the objective.
+    reconstruction = squared_error.masked_fill(~valid[..., None], 0.0).sum((1, 2))
+    denominators = valid_counts.clamp_min(1).to(reconstruction.dtype)
+    reconstruction = reconstruction / (denominators * self.command_token_dim)
+    reconstruction = torch.where(
+      valid_counts > 0, reconstruction, torch.zeros_like(reconstruction)
+    )
+    kl = 0.5 * (
+      mu.square() + torch.exp(logvar) - logvar - 1.0
+    ).sum(dim=-1)
+    return reconstruction, kl, valid_counts
 
   @torch.no_grad()
   def bottleneck_entropy(self) -> torch.Tensor | None:
@@ -396,8 +630,8 @@ class _ExportExGRMTActor(nn.Module):
 
   ``MLPModel``'s exporters deep-copy only ``obs_normalizer`` and ``mlp``, which would
   silently drop every encoder and the attention stack. This wrapper carries the whole
-  forward pass and exposes the three observation groups as named ONNX inputs, which is
-  also the interface the on-robot runtime has to fill.
+  forward pass and exposes the actor observation groups as named ONNX inputs. Causal
+  policies add history and command validity-mask inputs.
   """
 
   is_recurrent: bool = False
@@ -425,34 +659,49 @@ class _ExportExGRMTActor(nn.Module):
     self._proprio_dim = model.history_length * sum(model.proprio_term_dims)
     self._action_dim = model.history_length * model.action_dim
     self._command_dim = model.num_command_tokens * model.command_token_dim
+    self._mask_dim = model.num_command_tokens
 
   def forward(
     self,
     proprio_hist: torch.Tensor,
     action_hist: torch.Tensor,
     command_window: torch.Tensor,
+    history_valid_mask: torch.Tensor | None = None,
+    past_valid_mask: torch.Tensor | None = None,
   ) -> torch.Tensor:
-    obs = TensorDict(
-      {
-        PROPRIO_HIST: proprio_hist,
-        ACTION_HIST: action_hist,
-        COMMAND_WINDOW: command_window,
-      },
-      batch_size=[proprio_hist.shape[0]],
-    )
+    values = {
+      PROPRIO_HIST: proprio_hist,
+      ACTION_HIST: action_hist,
+      COMMAND_WINDOW: command_window,
+    }
+    if self.core.use_command_valid_mask:
+      if history_valid_mask is None or past_valid_mask is None:
+        raise ValueError(
+          "Causal actor export requires history_valid_mask and past_valid_mask."
+        )
+      values[HISTORY_VALID_MASK] = history_valid_mask
+      values[PAST_VALID_MASK] = past_valid_mask
+    obs = TensorDict(values, batch_size=[proprio_hist.shape[0]])
     latent = self.core.get_latent(obs)
     return self.deterministic_output(self.core.mlp(latent))
 
-  def get_dummy_inputs(self) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    return (
+  def get_dummy_inputs(self) -> tuple[torch.Tensor, ...]:
+    inputs = (
       torch.zeros(1, self._proprio_dim),
       torch.zeros(1, self._action_dim),
       torch.zeros(1, self._command_dim),
     )
+    if self.core.use_command_valid_mask:
+      return (
+        *inputs,
+        torch.ones(1, self.core.history_length, dtype=torch.bool),
+        torch.ones(1, self._mask_dim, dtype=torch.bool),
+      )
+    return inputs
 
   @property
   def input_names(self) -> list[str]:
-    return [PROPRIO_HIST, ACTION_HIST, COMMAND_WINDOW]
+    return list(self.core.required_groups)
 
   @property
   def output_names(self) -> list[str]:
@@ -469,9 +718,22 @@ def sinusoidal_positional_encoding(length: int, dim: int) -> torch.Tensor:
     raise ValueError(f"length must be positive, got {length}.")
   if dim <= 0:
     raise ValueError(f"dim must be positive, got {dim}.")
-  pos = torch.arange(length, dtype=torch.float32).unsqueeze(1)
+  return sinusoidal_positional_encoding_at(torch.arange(length), dim)
+
+
+def sinusoidal_positional_encoding_at(
+  positions: torch.Tensor, dim: int
+) -> torch.Tensor:
+  """Fixed sinusoidal encoding evaluated at explicit scalar time positions."""
+  if positions.dim() != 1 or positions.numel() == 0:
+    raise ValueError(
+      f"positions must be a non-empty 1-D tensor, got {tuple(positions.shape)}."
+    )
+  if dim <= 0:
+    raise ValueError(f"dim must be positive, got {dim}.")
+  pos = positions.to(dtype=torch.float32).unsqueeze(1)
   div = torch.exp(torch.arange(0, dim, 2).float() * (-math.log(10000.0) / dim))
-  pe = torch.zeros(length, dim)
+  pe = torch.zeros(positions.numel(), dim)
   pe[:, 0::2] = torch.sin(pos * div)
   # For odd dimensions the cosine branch has one fewer column.
   pe[:, 1::2] = torch.cos(pos * div[: pe[:, 1::2].shape[1]])

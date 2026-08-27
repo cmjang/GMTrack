@@ -93,6 +93,32 @@ HISTORY_LENGTH = 10
 COMMAND_WINDOW_RADIUS = 10
 """``L``: the reference window has 2L+1 = 21 tokens (paper Sec. III-B)."""
 
+CAUSAL_ACTOR_WINDOW_OFFSETS: tuple[int, ...] = (
+  -32,
+  -24,
+  -16,
+  -12,
+  -8,
+  -6,
+  -4,
+  -3,
+  -2,
+  -1,
+  0,
+)
+"""Near-dense/far-sparse causal history spanning 0.64 s at 50 Hz.
+
+DAJI (arXiv:2605.14417) and TeleGate (arXiv:2602.09628) both use dense recent
+samples and sparse older samples. This configurable local layout extends that idea
+to a longer window after the actor's positional encoding was made offset-aware.
+"""
+
+CAUSAL_CRITIC_WINDOW_OFFSETS: tuple[int, ...] = (1, 2, 4, 8, 16, 32, 64)
+"""Privileged future coverage through 1.28 s for the training-only critic."""
+
+CAUSAL_RECONSTRUCTION_OFFSETS: tuple[int, ...] = (5, 10, 20)
+"""Sparse future-prediction targets from TeleGate (arXiv:2602.09628)."""
+
 # Table II, command perturbation -- per *channel*, not a single magnitude:
 #   base linear velocity  +-0.5  m/s
 #   base angular velocity +-0.52 rad/s
@@ -107,14 +133,18 @@ _COMMAND_TOKEN_NOISE: tuple[float, ...] = (
 )
 
 
-def command_window_noise(heading_closed_loop: bool = False) -> tuple[float, ...]:
+def command_window_noise(
+  heading_closed_loop: bool = False,
+  *,
+  num_window_tokens: int = 2 * COMMAND_WINDOW_RADIUS + 1,
+) -> tuple[float, ...]:
   """Per-channel command-window noise for the 38D or heading-aware 44D token.
 
   The first 38 magnitudes are the unchanged Extreme-RGMT Table-II values. The
   opt-in six-dimensional relative orientation follows SONIC's 0.05 magnitude.
   """
   token = _COMMAND_TOKEN_NOISE + ((0.05,) * 6 if heading_closed_loop else ())
-  return token * (2 * COMMAND_WINDOW_RADIUS + 1)
+  return token * num_window_tokens
 
 
 # Public legacy constant: keep the faithful default exactly 21 x 38 channels.
@@ -258,6 +288,7 @@ def make_ex_grmt_env_cfg(
   require_v1_stratification: bool = False,
   stratification_mastered_manifest: str | None = None,
   stratification_challenging_manifest: str | None = None,
+  causal_online: bool = False,
 ) -> ManagerBasedRlEnvCfg:
   """Build the Extreme-RGMT tracking environment.
 
@@ -283,11 +314,21 @@ def make_ex_grmt_env_cfg(
       validation independently of which subset this task samples.
     stratification_challenging_manifest: Authenticated D_c manifest used for strict
       validation independently of which subset this task samples.
+    causal_online: Use the configurable strictly causal actor window, a training-only
+      stochastic intent reconstruction objective, and a history-conditioned
+      privileged critic with a masked future reference window.
   """
   if abs(sim_hz / POLICY_HZ - round(sim_hz / POLICY_HZ)) > 1e-9:
     raise ValueError(
       f"sim_hz={sim_hz} is not an integer multiple of the {POLICY_HZ} Hz policy rate."
     )
+
+  actor_window_offsets = CAUSAL_ACTOR_WINDOW_OFFSETS if causal_online else None
+  num_actor_window_tokens = (
+    len(actor_window_offsets)
+    if actor_window_offsets is not None
+    else 2 * COMMAND_WINDOW_RADIUS + 1
+  )
 
   ##
   # Observations
@@ -318,7 +359,9 @@ def make_ex_grmt_env_cfg(
           params={
             "command_name": "motion",
             "acquisition_fraction": acquisition_fraction,
-            "magnitude": command_window_noise(heading_closed_loop),
+            "magnitude": command_window_noise(
+              heading_closed_loop, num_window_tokens=num_actor_window_tokens
+            ),
             "enabled": not play,
           },
         )
@@ -342,6 +385,70 @@ def make_ex_grmt_env_cfg(
       enable_corruption=False,
     ),
   }
+  if causal_online:
+    observations["history_valid_mask"] = ObservationGroupCfg(
+      terms={
+        "mask": ObservationTermCfg(
+          func=mdp.executed_history_valid_mask,
+          params={"history_length": HISTORY_LENGTH},
+        )
+      },
+      concatenate_terms=True,
+      enable_corruption=False,
+    )
+    observations["past_valid_mask"] = ObservationGroupCfg(
+      terms={
+        "mask": ObservationTermCfg(
+          func=mdp.motion_command_past_valid_mask,
+          params={"command_name": "motion"},
+        )
+      },
+      concatenate_terms=True,
+      enable_corruption=False,
+    )
+    observations["command_future_window"] = ObservationGroupCfg(
+      terms={
+        "window": ObservationTermCfg(
+          func=mdp.motion_command_future_window,
+          params={"command_name": "motion"},
+        )
+      },
+      concatenate_terms=True,
+      enable_corruption=False,
+    )
+    observations["future_valid_mask"] = ObservationGroupCfg(
+      terms={
+        "mask": ObservationTermCfg(
+          func=mdp.motion_command_future_valid_mask,
+          params={"command_name": "motion"},
+        )
+      },
+      concatenate_terms=True,
+      enable_corruption=False,
+    )
+    # Training-only target groups are kept outside actor/critic obs_groups. They ride
+    # in rollout storage so PacePPO can apply reconstruction/KL to the exact
+    # acquisition rows selected by its existing pace_env_split-derived mask.
+    observations["future_reconstruction_target"] = ObservationGroupCfg(
+      terms={
+        "target": ObservationTermCfg(
+          func=mdp.motion_command_reconstruction_target,
+          params={"command_name": "motion"},
+        )
+      },
+      concatenate_terms=True,
+      enable_corruption=False,
+    )
+    observations["future_reconstruction_valid_mask"] = ObservationGroupCfg(
+      terms={
+        "mask": ObservationTermCfg(
+          func=mdp.motion_command_reconstruction_valid_mask,
+          params={"command_name": "motion"},
+        )
+      },
+      concatenate_terms=True,
+      enable_corruption=False,
+    )
 
   ##
   # Actions
@@ -393,6 +500,14 @@ def make_ex_grmt_env_cfg(
         stratification_challenging_manifest or acquisition_clips
       ),
       command_window_radius=COMMAND_WINDOW_RADIUS,
+      command_window_offsets=actor_window_offsets,
+      require_causal_window=causal_online,
+      critic_window_offsets=(
+        CAUSAL_CRITIC_WINDOW_OFFSETS if causal_online else None
+      ),
+      reconstruction_window_offsets=(
+        CAUSAL_RECONSTRUCTION_OFFSETS if causal_online else None
+      ),
       heading_closed_loop=heading_closed_loop,
       # These affect the simulated initial state, not the command observation.  The
       # paper's +/-0.1 rad entry belongs to command perturbation, already applied
