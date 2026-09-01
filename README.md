@@ -202,8 +202,8 @@ Because the Xsens high-dynamic slice is unavailable, the registered Stage-I task
 defaults to a duration-matched **proxy** built from public high-dynamic sources
 (screened MotionDecode and BONES-SEED takes plus representative cartwheels). Any
 experiment report using it must say so — it is not the paper's data distribution.
-Motion payloads are ignored by git; see [`data/README.md`](data/README.md) for the
-expected layout, and point the registry elsewhere without touching source code:
+Motion payloads are ignored by git. Point the registry at a local dataset without
+touching source code:
 
 ```bash
 export GMTRACK_DATA=/abs/path/to/data              # dataset root

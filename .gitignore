@@ -21,21 +21,6 @@ cankao/
 data/
 output/
 
-# Keep the data layout documentation in git while all local/generated payloads stay
-# ignored. Each directory is re-ignored before its README is allowed back in.
-!data/
-data/*
-!data/README.md
-!data/datasets/
-data/datasets/*
-!data/datasets/README.md
-!data/current/
-data/current/*
-!data/current/README.md
-!data/test/
-data/test/*
-!data/test/README.md
-
 # Local agent state.
 /CLAUDE.md
 /AGENTS.md
