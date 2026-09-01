@@ -10,7 +10,6 @@ from __future__ import annotations
 import hashlib
 import json
 import os
-import shutil
 import subprocess
 from dataclasses import asdict, is_dataclass
 from pathlib import Path
@@ -44,9 +43,7 @@ def sha256_file(path: str | Path) -> str:
 
 
 def _git_output(root: Path, *args: str) -> bytes:
-  # The SIST compute image still ships a Git release predating `git -C`.
-  # `cwd=` has identical repository-selection semantics and works there as well as
-  # on current developer machines.
+  # `cwd=` keeps repository selection explicit without changing process state.
   result = subprocess.run(
     ("git", *args),
     check=True,
@@ -61,8 +58,7 @@ def source_state(root: str | Path) -> dict[str, Any]:
   """Return commit and hashes that distinguish a dirty working tree."""
   repo = Path(root).resolve()
   commit = _git_output(repo, "rev-parse", "HEAD").decode().strip()
-  # `--porcelain` is the stable v1 format. Spell it without `=v1` because the
-  # cluster's Git 1.8.3.1 supports the former but rejects the newer alias.
+  # `--porcelain` is the stable v1 format.
   status = _git_output(repo, "status", "--porcelain", "--untracked-files=all")
   diff = _git_output(repo, "diff", "--binary", "HEAD")
   tracked_digest = hashlib.sha256(diff).hexdigest()
@@ -92,28 +88,6 @@ def source_state(root: str | Path) -> dict[str, Any]:
     "tracked_diff_sha256": tracked_digest,
     "untracked_source_sha256": untracked,
     "source_tree_sha256": combined.hexdigest(),
-  }
-
-
-def _slurm_state() -> dict[str, str | None]:
-  job_id = os.environ.get("SLURM_JOB_ID")
-  batch_script = None
-  if job_id is not None:
-    # Compute-node batch shells on SIST do not always inherit Slurm's bin path.
-    # Prefer PATH when it is configured, then use the cluster's stable install
-    # location so provenance capture cannot abort an otherwise valid run.
-    scontrol = shutil.which("scontrol") or "/opt/gridview/slurm/bin/scontrol"
-    batch_script = subprocess.run(
-      (scontrol, "write", "batch_script", job_id, "-"),
-      check=True,
-      stdout=subprocess.PIPE,
-      stderr=subprocess.PIPE,
-      text=True,
-    ).stdout
-  return {
-    "job_id": job_id,
-    "array_task_id": os.environ.get("SLURM_ARRAY_TASK_ID"),
-    "batch_script": batch_script,
   }
 
 
@@ -368,7 +342,6 @@ def build_run_provenance(
     },
     "source": source_state(repo_root),
     "artifacts": artifact_hashes,
-    "slurm": _slurm_state(),
     "observation_schema": observation_schema,
     "train_cfg": _jsonable(train_cfg),
   }

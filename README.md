@@ -58,7 +58,7 @@ bottleneck; the actor consumes only deployable observations.
 ## Status
 
 The implementation is complete and covered by unit tests, and a first end-to-end
-formal chain (Stage I → stratification → Stage II) has finished on the cluster.
+formal chain (Stage I → stratification → Stage II) has finished.
 **No reproduction numbers are claimed yet** — the paper reports mean ± std over five
 independently trained seeds on four test sets, and that evaluation sweep is still
 outstanding.
@@ -85,7 +85,7 @@ directly to skip that.
 
 ## Pipeline
 
-### 1. Prepare motions (local)
+### 1. Prepare motions
 
 `prepare_motions` writes one complete sequence per source CSV — no 10 s slicing
 happens here.
@@ -120,7 +120,7 @@ Replay the reference with a zero-action policy to sanity-check a manifest:
 uv run play GMTrack-Stage1-Flat-Unitree-G1 --agent zero
 ```
 
-### 2. Stage I (cluster)
+### 2. Stage I
 
 Environment count and iteration budget are baked into the task configuration, so no
 scale flags are needed:
@@ -129,7 +129,7 @@ scale flags are needed:
 uv run train GMTrack-Stage1-Flat-Unitree-G1
 ```
 
-### 3. Stratification (single GPU)
+### 3. Stratification
 
 Must use the same manifest Stage I trained on, otherwise `D_m ∪ D_c` no longer covers
 the training distribution.
@@ -145,7 +145,7 @@ This produces `stratified.json`, `mastered.json`, `challenging.json` and
 validated as a set; hand-edited splits fail closed. Against paper Table V, `D_c`
 should land around 10% of the corpus — close to half means Stage I is undertrained.
 
-### 4. Stage II (cluster)
+### 4. Stage II
 
 ```bash
 uv run train GMTrack-Stage2-Flat-Unitree-G1 \
@@ -173,10 +173,6 @@ uv run python -m gmtrack.scripts.aggregate_evaluations \
 To inspect a checkpoint interactively, `python -m gmtrack.scripts.webplay` opens a
 Viser viewer through the evaluation harness — it loads policy weights only, never the
 training motion sampler.
-
-Cluster jobs live under `scripts/slurm/`. The scripts take every machine-specific
-path from the environment (`GMTRACK_PROJECT_DIR`, `GMTRACK_DATA`, `CONDA_ENV_PREFIX`)
-rather than hard-coding a cluster layout.
 
 ## Registered tasks
 

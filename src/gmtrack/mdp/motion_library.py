@@ -481,7 +481,7 @@ class MotionLibrary:
       path = Path(e["path"])
       if not path.is_absolute():
         # Manifest paths are relative to the manifest itself so the data dir stays
-        # relocatable between the dev box and the cluster.
+        # relocatable between machines.
         path = (root / path).resolve()
       files.append(path)
       frame_stop = (

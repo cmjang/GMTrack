@@ -22,8 +22,7 @@ def data_dir() -> Path:
   """Root of the motion dataset.
 
   Defaults to ``<repo>/data`` (this package is installed editable from ``src/``).
-  Override with ``GMTRACK_DATA`` when the dataset lives elsewhere -- e.g. on scratch
-  storage on the cluster.
+  Override with ``GMTRACK_DATA`` when the dataset lives elsewhere.
   """
   env = os.environ.get("GMTRACK_DATA")
   if env:

@@ -35,26 +35,10 @@ data/current/*
 !data/test/
 data/test/*
 !data/test/README.md
-scripts/slurm/
-!scripts/slurm/
-scripts/slurm/*
-!scripts/slurm/.gitkeep
-!scripts/slurm/train_stage1_v1_proxy.sbatch
-!scripts/slurm/stratify_v1_proxy.sbatch
-!scripts/slurm/train_stage2_gate_v1_proxy.sbatch
-!scripts/slurm/train_stage2_diagnostic_v1_proxy.sbatch
-!scripts/slurm/stratify_dong29999_probe.sbatch
-!scripts/slurm/train_stage2_dong29999_probe.sbatch
-!scripts/slurm/evaluate_dong29999_probe.sbatch
-!scripts/slurm/train_stage1_causal.sbatch
-!scripts/slurm/train_stage1_causal_heading.sbatch
 
-# Agent instructions and the cluster job ledger -- local working files. The ledger
-# records real Slurm job IDs, cluster paths and account names; none of that belongs in
-# a published repository.
+# Local agent state.
 /CLAUDE.md
 /AGENTS.md
-/SLURM_JOBS.md
 
 # Local paper PDFs -- kept out of the repository; download them from arXiv.
 2601.23080v1.pdf

@@ -853,7 +853,7 @@ def make_gmtrack_env_cfg(
       nconmax=35,
       # The InstinctMJ whole-body collision profile can create substantially more
       # constraint rows than mjlab's stock G1, especially during randomized
-      # recovery resets.  The stock njmax=250 overflowed in long cluster runs and
+      # recovery resets.  The stock njmax=250 overflowed in long training runs and
       # the truncated solve subsequently produced NaN proprioception.  Observed
       # peaks were 418 rows, so keep headroom for unseen contact configurations.
       njmax=512,

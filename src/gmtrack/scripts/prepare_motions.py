@@ -918,7 +918,7 @@ def _entry(
     "name": name,
     "source": cfg.source,
     # Stored relative to the manifest so the whole data directory can be rsync'd to
-    # the cluster without rewriting paths. MotionLibrary.from_manifest resolves it.
+    # another machine without rewriting paths. MotionLibrary.from_manifest resolves it.
     "path": os.path.relpath(out_path.resolve(), manifest_path.parent.resolve()),
     "num_frames": int(num_frames),
     "fps": float(cfg.output_fps),

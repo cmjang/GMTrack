@@ -267,7 +267,7 @@ def test_observation_schema_rejects_tampered_payload():
     )
 
 
-def test_source_state_uses_git_1_8_compatible_invocations(tmp_path, monkeypatch):
+def test_source_state_runs_git_in_the_requested_repository(tmp_path, monkeypatch):
   calls = []
 
   def run(command, **kwargs):
@@ -285,32 +285,3 @@ def test_source_state_uses_git_1_8_compatible_invocations(tmp_path, monkeypatch)
   status_command = next(command for command, _ in calls if command[1] == "status")
   assert "--porcelain" in status_command
   assert "--porcelain=v1" not in status_command
-
-
-def test_slurm_state_falls_back_to_cluster_scontrol(monkeypatch):
-  calls = []
-
-  def run(command, **kwargs):
-    calls.append((command, kwargs))
-    return SimpleNamespace(stdout="#!/bin/bash\n")
-
-  monkeypatch.setenv("SLURM_JOB_ID", "12345")
-  monkeypatch.delenv("SLURM_ARRAY_TASK_ID", raising=False)
-  monkeypatch.setattr(provenance_module.shutil, "which", lambda _: None)
-  monkeypatch.setattr(provenance_module.subprocess, "run", run)
-
-  state = provenance_module._slurm_state()
-
-  assert calls[0][0] == (
-    "/opt/gridview/slurm/bin/scontrol",
-    "write",
-    "batch_script",
-    "12345",
-    "-",
-  )
-  assert calls[0][1]["check"] is True
-  assert state == {
-    "job_id": "12345",
-    "array_task_id": None,
-    "batch_script": "#!/bin/bash\n",
-  }
