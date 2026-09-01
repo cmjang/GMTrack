@@ -6,16 +6,14 @@ as an external task package for [mjlab](https://github.com/mujocolab/mjlab).
 [![Built on mjlab](https://img.shields.io/badge/built%20on-mjlab-4c1.svg)](https://github.com/mujocolab/mjlab)
 [![Python](https://img.shields.io/badge/python-3.10%E2%80%933.13-blue.svg)](https://www.python.org/)
 
-> **Unofficial reproduction.** GMTrack is an independent reimplementation of
-> *Extreme-RGMT: Continual Learning of Highly Dynamic Skills for Robust Generalist
-> Humanoid Control* (arXiv:2607.20110). It is not affiliated with or endorsed by the
-> original authors, and it carries its own name so it is never mistaken for their
-> release. Numbers produced here are ours, not theirs.
+GMTrack takes the two-stage continual-learning recipe of Extreme-RGMT — PACE and STAR —
+and builds it on the mjlab/BeyondMimic tracking stack, filling in what the papers leave
+unspecified from the public SONIC and InstinctLab releases. It is not affiliated with or
+endorsed by any of them.
 
-Extreme-RGMT extends BeyondMimic, and mjlab already ships a BeyondMimic
-reimplementation under `mjlab/tasks/tracking/`. GMTrack therefore plugs into mjlab
-instead of forking it: tasks are registered through mjlab's entry-point hook, and the
-learning code subclasses rsl-rl.
+mjlab already ships a BeyondMimic reimplementation under `mjlab/tasks/tracking/`, so
+GMTrack plugs into mjlab instead of forking it: tasks register through mjlab's
+entry-point hook, and the learning code subclasses rsl-rl.
 
 ## Method
 
@@ -53,8 +51,8 @@ Research code under active development.
 
 - The implementation is complete and covered by unit tests, and one end-to-end chain
   (Stage I → stratification → Stage II) has run to completion.
-- **No reproduction numbers are claimed yet.** The paper reports mean ± std over five
-  independently trained seeds on four test sets, and that sweep is still outstanding.
+- **No benchmark numbers are published yet** — the five-seed sweep over the four test
+  sets has not been run.
 - Task configs, manifests, and interfaces may still change between commits.
 
 ## Installation
@@ -228,7 +226,7 @@ end or to failure, and metrics are Succ. / `E_MPJPE` (mm, root-relative) / `d_ve
 (mm/frame) / `d_acc` (mm/frame²), averaged over five training seeds.
 
 The paper's four test sets are all distinct from `D_c` — `D_c` is a training set, and
-numbers on it cannot be compared to Table VI. Reported values, as Succ. / `E_MPJPE`:
+numbers on it cannot be compared to Table VI. Extreme-RGMT's published values, as Succ. / `E_MPJPE`:
 
 | Category | Test set | Stage I | Full (Stage II) |
 |---|---|---|---|
@@ -251,8 +249,8 @@ history:
 | Stage I | causal + heading | [`stage1_causal_heading_model_99999.pt`](https://github.com/cmjang/GMTrack/releases/download/checkpoint-stage1-baselines/stage1_causal_heading_model_99999.pt) |
 | Stage II | no heading | [`model_17000.pt`](https://github.com/cmjang/GMTrack/releases/download/checkpoint-original-stage2-backflip/model_17000.pt), [`model_31500.pt`](https://github.com/cmjang/GMTrack/releases/download/checkpoint-original-stage2-backflip/model_31500.pt), [`model_32000.pt`](https://github.com/cmjang/GMTrack/releases/download/checkpoint-original-stage2-backflip/model_32000.pt) |
 
-Checkpoints produced before the current paper-alignment fixes are useful for inspection
-but not for final results: retrain Stage I, rerun stratification, then retrain Stage II.
+Checkpoints produced before the current round of alignment fixes are fine for inspection
+but not for final numbers: retrain Stage I, rerun stratification, then retrain Stage II.
 
 ## Development
 
@@ -286,23 +284,17 @@ Conventions:
 
 ## References
 
-If you use this work, cite the papers rather than this repository.
+Built on [mjlab](https://github.com/mujocolab/mjlab) and
+[rsl-rl](https://github.com/leggedrobotics/rsl_rl), drawing on:
 
 - *Extreme-RGMT: Continual Learning of Highly Dynamic Skills for Robust Generalist
-  Humanoid Control* — [arXiv:2607.20110](https://arxiv.org/abs/2607.20110). The
-  reproduction target.
-- *RGMT: Robust and Generalized Humanoid Motion Tracking* —
-  [arXiv:2601.23080](https://arxiv.org/abs/2601.23080). Prior work, and the source for
-  base details Extreme-RGMT omits, such as the attention block internals.
+  Humanoid Control* — [arXiv:2607.20110](https://arxiv.org/abs/2607.20110) — and its
+  predecessor *RGMT* — [arXiv:2601.23080](https://arxiv.org/abs/2601.23080).
+- [InstinctLab](https://github.com/project-instinct/InstinctLab) and
+  [SONIC](https://github.com/NVlabs/GR00T-WholeBodyControl), for values the papers leave
+  unspecified.
 
-## Acknowledgements
-
-Built on [mjlab](https://github.com/mujocolab/mjlab) and
-[rsl-rl](https://github.com/leggedrobotics/rsl_rl). Unpublished low-level choices —
-action scaling, actuator parameters, collision primitives, push ranges, tokenizer width —
-are resolved against the public BeyondMimic/InstinctLab and SONIC releases. Neither
-contains RGMT or Extreme-RGMT source, so the two papers remain the only authority for
-PACE, STAR, the encoder, and the randomization ranges.
+Cite the papers rather than this repository.
 
 ## License
 
