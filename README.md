@@ -66,6 +66,20 @@ outstanding.
 Checkpoints produced before the current paper-alignment fixes must not be used for
 final results: retrain Stage I, rerun stratification, then retrain Stage II.
 
+## Checkpoints
+
+Pretrained weights are stored as GitHub Release assets instead of in the git
+history:
+
+| Task | Checkpoint |
+|---|---|
+| Stage II, no heading | [`model_31500.pt`](https://github.com/cmjang/GMTrack/releases/download/checkpoint-original-stage2-backflip/model_31500.pt) |
+| Stage II, no heading | [`model_32000.pt`](https://github.com/cmjang/GMTrack/releases/download/checkpoint-original-stage2-backflip/model_32000.pt) |
+| Stage II, no heading | [`model_17000.pt`](https://github.com/cmjang/GMTrack/releases/download/checkpoint-original-stage2-backflip/model_17000.pt) |
+| Stage I, heading | [`stage1_heading_model_99999.pt`](https://github.com/cmjang/GMTrack/releases/download/checkpoint-stage1-baselines/stage1_heading_model_99999.pt) |
+| Stage I, no heading | [`stage1_no_heading_model_116500.pt`](https://github.com/cmjang/GMTrack/releases/download/checkpoint-stage1-baselines/stage1_no_heading_model_116500.pt) |
+| Stage I, causal + heading | [`stage1_causal_heading_model_99999.pt`](https://github.com/cmjang/GMTrack/releases/download/checkpoint-stage1-baselines/stage1_causal_heading_model_99999.pt) |
+
 ## Installation
 
 Requires Linux x86_64 with an NVIDIA GPU — `mujoco-warp` has no CPU path, so a CPU
