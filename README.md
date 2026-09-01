@@ -1,25 +1,21 @@
 # GMTrack
 
+Highly dynamic humanoid whole-body motion tracking on the Unitree G1 (29 DoF), packaged
+as an external task package for [mjlab](https://github.com/mujocolab/mjlab).
+
 [![Built on mjlab](https://img.shields.io/badge/built%20on-mjlab-4c1.svg)](https://github.com/mujocolab/mjlab)
 [![Python](https://img.shields.io/badge/python-3.10%E2%80%933.13-blue.svg)](https://www.python.org/)
 
-Unofficial reproduction of highly dynamic humanoid whole-body motion tracking on the
-Unitree G1 (29 DoF), written against two public references:
+> **Unofficial reproduction.** GMTrack is an independent reimplementation of
+> *Extreme-RGMT: Continual Learning of Highly Dynamic Skills for Robust Generalist
+> Humanoid Control* (arXiv:2607.20110). It is not affiliated with or endorsed by the
+> original authors, and it carries its own name so it is never mistaken for their
+> release. Numbers produced here are ours, not theirs.
 
-- **Extreme-RGMT: Continual Learning of Highly Dynamic Skills for Robust Generalist
-  Humanoid Control** (arXiv:2607.20110)
-- **SONIC** (and BeyondMimic / InstinctLab)
-
-> **GMTrack is not the official implementation.** It is an independent reimplementation
-> from the papers, not affiliated with or endorsed by any of the original authors, and it
-> carries its own name so it is never mistaken for their release. Numbers produced here
-> are ours, not theirs.
-
-Extreme-RGMT extends BeyondMimic, and [mjlab](https://github.com/mujocolab/mjlab)
-already ships a BeyondMimic reimplementation under `mjlab/tasks/tracking/`. This
-repository is therefore an **external mjlab task package**: it registers its own tasks
-through mjlab's entry-point hook and subclasses rsl-rl instead of forking either
-project.
+Extreme-RGMT extends BeyondMimic, and mjlab already ships a BeyondMimic
+reimplementation under `mjlab/tasks/tracking/`. GMTrack therefore plugs into mjlab
+instead of forking it: tasks are registered through mjlab's entry-point hook, and the
+learning code subclasses rsl-rl.
 
 ## Method
 
@@ -41,67 +37,55 @@ D — all motion data (paper Table IV)
                                                                           ► π_aug
 ```
 
-Two mechanisms carry Stage II:
-
 - **PACE** — asymmetric acquisition/consolidation environment roles plus a
-  progress-adaptive regularizer `λ_con` toward the frozen base policy, so learning
-  new highly dynamic skills does not erase mastered ones.
+  progress-adaptive regularizer `λ_con` toward the frozen base policy, so learning new
+  highly dynamic skills does not erase mastered ones.
 - **STAR** — advantage-prioritized resampling of trajectory fragments drawn from the
-  hardest temporal bins, which compensates for the sparse and failure-heavy samples
-  produced by extreme motions.
-
-The policy itself is a three-branch encoder (proprioceptive state, past actions,
-command window) feeding a causal attention encoder with a finite-scalar-quantization
-bottleneck; the actor consumes only deployable observations.
+  hardest temporal bins, which compensates for the sparse, failure-heavy samples that
+  extreme motions produce.
+- **Policy** — a three-branch encoder (proprioceptive state, past actions, command
+  window) feeding a causal attention encoder with a finite-scalar-quantization
+  bottleneck. The actor consumes only deployable observations.
 
 ## Status
 
-The implementation is complete and covered by unit tests, and a first end-to-end
-formal chain (Stage I → stratification → Stage II) has finished.
-**No reproduction numbers are claimed yet** — the paper reports mean ± std over five
-independently trained seeds on four test sets, and that evaluation sweep is still
-outstanding.
+Research code under active development.
 
-Checkpoints produced before the current paper-alignment fixes must not be used for
-final results: retrain Stage I, rerun stratification, then retrain Stage II.
-
-## Checkpoints
-
-Pretrained weights are stored as GitHub Release assets instead of in the git
-history:
-
-| Task | Checkpoint |
-|---|---|
-| Stage II, no heading | [`model_31500.pt`](https://github.com/cmjang/GMTrack/releases/download/checkpoint-original-stage2-backflip/model_31500.pt) |
-| Stage II, no heading | [`model_32000.pt`](https://github.com/cmjang/GMTrack/releases/download/checkpoint-original-stage2-backflip/model_32000.pt) |
-| Stage II, no heading | [`model_17000.pt`](https://github.com/cmjang/GMTrack/releases/download/checkpoint-original-stage2-backflip/model_17000.pt) |
-| Stage I, heading | [`stage1_heading_model_99999.pt`](https://github.com/cmjang/GMTrack/releases/download/checkpoint-stage1-baselines/stage1_heading_model_99999.pt) |
-| Stage I, no heading | [`stage1_no_heading_model_116500.pt`](https://github.com/cmjang/GMTrack/releases/download/checkpoint-stage1-baselines/stage1_no_heading_model_116500.pt) |
-| Stage I, causal + heading | [`stage1_causal_heading_model_99999.pt`](https://github.com/cmjang/GMTrack/releases/download/checkpoint-stage1-baselines/stage1_causal_heading_model_99999.pt) |
+- The implementation is complete and covered by unit tests, and one end-to-end chain
+  (Stage I → stratification → Stage II) has run to completion.
+- **No reproduction numbers are claimed yet.** The paper reports mean ± std over five
+  independently trained seeds on four test sets, and that sweep is still outstanding.
+- Task configs, manifests, and interfaces may still change between commits.
 
 ## Installation
 
-Requires Linux x86_64 with an NVIDIA GPU — `mujoco-warp` has no CPU path, so a CPU
-install cannot train. torch is pinned to the CUDA 12.8 index unconditionally.
+Requirements:
+
+- Linux x86_64 with an NVIDIA GPU — mjlab simulates through MuJoCo Warp, which has no
+  CPU backend
+- Python 3.10–3.13
+- [uv](https://docs.astral.sh/uv/)
 
 ```bash
+git clone https://github.com/cmjang/GMTrack.git
+cd GMTrack
 uv sync
 uv run list-envs | grep GMTrack
 ```
+
+`uv sync` resolves torch from the CUDA 12.8 index. `uv run` re-syncs the environment on
+every invocation; call `.venv/bin/python -m ...` directly to skip that.
 
 `third_party/rsl_rl` is a local editable checkout of `rsl-rl-lib` 5.4.0, the version
 mjlab pins exactly. It is never patched — every modification lives in
 `src/gmtrack/rsl_rl/` and is injected through rsl-rl's `"module:Class"` resolution.
 
-`uv run` re-syncs the environment on every invocation; use `.venv/bin/python -m ...`
-directly to skip that.
-
 ## Pipeline
 
 ### 1. Prepare motions
 
-`prepare_motions` writes one complete sequence per source CSV — no 10 s slicing
-happens here.
+`prepare_motions` writes one complete sequence per source CSV — no 10 s slicing happens
+here.
 
 ```bash
 uv run python -m gmtrack.scripts.prepare_motions \
@@ -111,8 +95,8 @@ uv run python -m gmtrack.scripts.prepare_motions \
     --manifest logs/data_build/manifests/lafan1_full.json
 ```
 
-High-dynamic proxy clips are additionally aligned against the G1 collision geometry
-and must pass the clearance gate before entering a manifest:
+High-dynamic proxy clips are additionally aligned against the G1 collision geometry and
+must pass the clearance gate before entering a manifest:
 
 ```bash
 uv run python -m gmtrack.scripts.prepare_motions \
@@ -144,8 +128,8 @@ uv run train GMTrack-Stage1-Flat-Unitree-G1
 
 ### 3. Stratification
 
-Must use the same manifest Stage I trained on, otherwise `D_m ∪ D_c` no longer covers
-the training distribution.
+Use the same manifest Stage I trained on, otherwise `D_m ∪ D_c` no longer covers the
+training distribution.
 
 ```bash
 uv run python -m gmtrack.scripts.stratify \
@@ -154,9 +138,9 @@ uv run python -m gmtrack.scripts.stratify \
 ```
 
 This produces `stratified.json`, `mastered.json`, `challenging.json` and
-`stratification_report.json`. The four files share one provenance hash and are
-validated as a set; hand-edited splits fail closed. Against paper Table V, `D_c`
-should land around 10% of the corpus — close to half means Stage I is undertrained.
+`stratification_report.json`. The four files share one provenance hash and are validated
+as a set; hand-edited splits fail closed. Against paper Table V, `D_c` should land around
+10% of the corpus — close to half means Stage I is undertrained.
 
 ### 4. Stage II
 
@@ -183,20 +167,20 @@ uv run python -m gmtrack.scripts.aggregate_evaluations \
     --inputs logs/eval/seed4{2,3,4,5,6}.json --out logs/eval/five_seed_summary.json
 ```
 
-To inspect a checkpoint interactively, `python -m gmtrack.scripts.webplay` opens a
-Viser viewer through the evaluation harness — it loads policy weights only, never the
+`python -m gmtrack.scripts.webplay` opens a Viser viewer through the evaluation harness
+for interactive inspection of a checkpoint; it loads policy weights only, never the
 training motion sampler.
 
 ## Registered tasks
 
-| Task ID | Role |
+| Task ID | Description |
 |---|---|
-| `GMTrack-Stage1-Flat-Unitree-G1` | Original Stage I |
-| `GMTrack-Stage2-Flat-Unitree-G1` | Original Stage II |
-| `GMTrack-Stage1-Heading-Flat-Unitree-G1` | Original Stage I with heading feedback |
-| `GMTrack-Stage2-Heading-Flat-Unitree-G1` | Original Stage II with heading feedback |
-| `GMTrack-Stage1-Causal-Flat-Unitree-G1` | Past-only Stage I without heading feedback |
-| `GMTrack-Stage1-Causal-Heading-Flat-Unitree-G1` | Past-only Stage I with heading feedback |
+| `GMTrack-Stage1-Flat-Unitree-G1` | Stage I, paper-default command window |
+| `GMTrack-Stage2-Flat-Unitree-G1` | Stage II, paper-default command window |
+| `GMTrack-Stage1-Heading-Flat-Unitree-G1` | Stage I with heading feedback |
+| `GMTrack-Stage2-Heading-Flat-Unitree-G1` | Stage II with heading feedback |
+| `GMTrack-Stage1-Causal-Flat-Unitree-G1` | Stage I, past-only command window |
+| `GMTrack-Stage1-Causal-Heading-Flat-Unitree-G1` | Stage I, past-only window with heading feedback |
 
 `Causal` tasks use only current and past command tokens. `Heading` appends the 6D
 robot-to-reference pelvis orientation error to each command token.
@@ -211,10 +195,11 @@ The paper trains Stage I on 3.096 h of retargeted 50 Hz motion:
 | AMASS | 0.511 h | needs your own retargeting to G1 |
 | In-house Xsens captures | 0.141 h | not public |
 
-Because the Xsens high-dynamic slice is unavailable, the registered Stage-I task
-defaults to a duration-matched **proxy** built from public high-dynamic sources
-(screened MotionDecode and BONES-SEED takes plus representative cartwheels). Any
-experiment report using it must say so — it is not the paper's data distribution.
+Because the Xsens high-dynamic slice is unavailable, the registered Stage-I task defaults
+to a duration-matched **proxy** built from public high-dynamic sources (screened
+MotionDecode and BONES-SEED takes plus representative cartwheels). Any experiment report
+using it must say so — it is not the paper's data distribution.
+
 Motion payloads are ignored by git. Point the registry at a local dataset without
 touching source code:
 
@@ -226,23 +211,24 @@ export GMTRACK_MASTERED_MANIFEST=/abs/path/to/mastered.json
 export GMTRACK_CHALLENGING_MANIFEST=/abs/path/to/challenging.json
 ```
 
-Two conversion rules matter. Body ordering follows MuJoCo's depth-first convention,
-so IsaacLab-derived converters silently track the wrong links — use
-`prepare_motions` (or mjlab's `csv_to_npz`) only. And proxy clips retargeted from
-other skeletons are ground-aligned upward against all 29 active G1 collision geoms
-with a 3 mm clearance gate, re-differentiating root velocity afterwards; that
-threshold is a local data-cleaning choice, not a paper parameter.
+Two conversion rules:
+
+- **Body ordering follows MuJoCo's depth-first convention.** IsaacLab-derived converters
+  silently track the wrong links, so use `prepare_motions` (or mjlab's `csv_to_npz`).
+- **Proxy clips retargeted from other skeletons are ground-aligned upward** against all
+  29 active G1 collision geoms with a 3 mm clearance gate, re-differentiating root
+  velocity afterwards. That threshold is a local data-cleaning choice, not a paper
+  parameter.
 
 ## Evaluation protocol
 
 Following Sec. VI-A, the only failure criterion is root height deviating from the
-reference by more than 0.2 m. Each rollout runs from the reference's first frame to
-its end or to failure, and metrics are Succ. / `E_MPJPE` (mm, root-relative) /
-`d_vel` (mm/frame) / `d_acc` (mm/frame²), averaged over five training seeds.
+reference by more than 0.2 m. Each rollout runs from the reference's first frame to its
+end or to failure, and metrics are Succ. / `E_MPJPE` (mm, root-relative) / `d_vel`
+(mm/frame) / `d_acc` (mm/frame²), averaged over five training seeds.
 
-The paper's four test sets are all distinct from `D_c` — `D_c` is a training set and
-numbers on it cannot be compared to Table VI. Its reported values, as
-Succ. / `E_MPJPE`:
+The paper's four test sets are all distinct from `D_c` — `D_c` is a training set, and
+numbers on it cannot be compared to Table VI. Reported values, as Succ. / `E_MPJPE`:
 
 | Category | Test set | Stage I | Full (Stage II) |
 |---|---|---|---|
@@ -251,7 +237,22 @@ Succ. / `E_MPJPE`:
 | Specialist | XtremeMotion (public OmniXtreme high-dynamic set) | 21.42% / 46.72 mm | 100.00% / 40.18 mm |
 | Specialist | AMASS Challenging (hard AMASS motions, direct retarget) | 18.18% / 55.17 mm | 90.91% / 46.39 mm |
 
-The specialist gap is the entire point of Stage II.
+The specialist gap is what Stage II is for.
+
+## Checkpoints
+
+Pretrained weights are published as GitHub Release assets rather than committed to git
+history:
+
+| Stage | Variant | Files |
+|---|---|---|
+| Stage I | no heading | [`stage1_no_heading_model_116500.pt`](https://github.com/cmjang/GMTrack/releases/download/checkpoint-stage1-baselines/stage1_no_heading_model_116500.pt) |
+| Stage I | heading | [`stage1_heading_model_99999.pt`](https://github.com/cmjang/GMTrack/releases/download/checkpoint-stage1-baselines/stage1_heading_model_99999.pt) |
+| Stage I | causal + heading | [`stage1_causal_heading_model_99999.pt`](https://github.com/cmjang/GMTrack/releases/download/checkpoint-stage1-baselines/stage1_causal_heading_model_99999.pt) |
+| Stage II | no heading | [`model_17000.pt`](https://github.com/cmjang/GMTrack/releases/download/checkpoint-original-stage2-backflip/model_17000.pt), [`model_31500.pt`](https://github.com/cmjang/GMTrack/releases/download/checkpoint-original-stage2-backflip/model_31500.pt), [`model_32000.pt`](https://github.com/cmjang/GMTrack/releases/download/checkpoint-original-stage2-backflip/model_32000.pt) |
+
+Checkpoints produced before the current paper-alignment fixes are useful for inspection
+but not for final results: retrain Stage I, rerun stratification, then retrain Stage II.
 
 ## Development
 
@@ -260,12 +261,16 @@ uv run pytest tests/ -v
 uv run ruff check src tests
 ```
 
-Style follows mjlab: 2-space indent, ruff `["E4", "E7", "E9", "F", "I", "B"]`.
-Subclass rsl-rl rather than editing `third_party/rsl_rl`, and prefer raising over
-defensive fallbacks — a silent clamp or `getattr(..., default)` hides exactly the
-class of bug that is hardest to find here, a plausible but wrong reference frame.
+Conventions:
 
-### Code map
+- mjlab style: 2-space indent, ruff `["E4", "E7", "E9", "F", "I", "B"]`.
+- Subclass rsl-rl rather than editing `third_party/rsl_rl`.
+- Prefer raising over defensive fallbacks. A silent clamp or `getattr(..., default)`
+  hides the class of bug that is hardest to find here: a plausible but wrong reference
+  frame.
+- Every paper constant carries a comment naming the table or equation it comes from.
+
+### Project layout
 
 | Path | Responsibility |
 |---|---|
@@ -279,15 +284,27 @@ class of bug that is hardest to find here, a plausible but wrong reference frame
 | `src/gmtrack/motion_grounding.py` | collision-geometry ground alignment |
 | `src/gmtrack/scripts/` | data preparation, stratification, evaluation, viewers |
 
+## References
+
+If you use this work, cite the papers rather than this repository.
+
+- *Extreme-RGMT: Continual Learning of Highly Dynamic Skills for Robust Generalist
+  Humanoid Control* — [arXiv:2607.20110](https://arxiv.org/abs/2607.20110). The
+  reproduction target.
+- *RGMT: Robust and Generalized Humanoid Motion Tracking* —
+  [arXiv:2601.23080](https://arxiv.org/abs/2601.23080). Prior work, and the source for
+  base details Extreme-RGMT omits, such as the attention block internals.
+
 ## Acknowledgements
 
 Built on [mjlab](https://github.com/mujocolab/mjlab) and
 [rsl-rl](https://github.com/leggedrobotics/rsl_rl). Unpublished low-level choices —
-action scaling, actuator parameters, collision primitives, push ranges, tokenizer
-width — are resolved against the public BeyondMimic/InstinctLab and SONIC releases;
-neither contains RGMT or Extreme-RGMT source, so the two papers remain the only
-authority for PACE, STAR, the encoder, and the randomization ranges.
+action scaling, actuator parameters, collision primitives, push ranges, tokenizer width —
+are resolved against the public BeyondMimic/InstinctLab and SONIC releases. Neither
+contains RGMT or Extreme-RGMT source, so the two papers remain the only authority for
+PACE, STAR, the encoder, and the randomization ranges.
 
 ## License
 
-Not yet specified — no reuse rights are granted yet. Open an issue if you need one.
+No license has been chosen yet, so default copyright applies and no reuse rights are
+granted. Open an issue if you need one.
