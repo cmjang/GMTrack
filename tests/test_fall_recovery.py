@@ -17,11 +17,13 @@ import torch
 
 pytest.importorskip("mjlab")
 
-from ex_grmt.mdp.commands import MultiMotionCommand
-from ex_grmt.mdp.events import recovery_assist_force
-from ex_grmt.mdp.terminations import (
+from gmtrack.mdp.commands import MultiMotionCommand
+from gmtrack.mdp.events import recovery_assist_force
+from gmtrack.mdp.terminations import (
   bad_anchor_pos_z_only,
   bad_anchor_pos_z_only_outside_recovery,
+  bad_motion_body_pos_xy,
+  bad_motion_body_pos_xy_outside_recovery,
   bad_motion_body_pos_z_only,
   bad_motion_body_pos_z_only_outside_recovery,
 )
@@ -322,6 +324,48 @@ def test_shielded_termination_suppressed_only_inside_window():
   assert gated.tolist() == [False, True, True]
 
 
+def test_foot_xy_termination_uses_reanchored_positions_and_recovery_shield():
+  command = SimpleNamespace(
+    cfg=SimpleNamespace(body_names=("left_ankle", "right_ankle", "wrist")),
+    # These references are already pelvis-XY/yaw-aligned by MultiMotionCommand. The
+    # first ankle exceeds the XY threshold; the second only has a large Z error,
+    # which must not leak into the horizontal placement check.
+    body_pos_relative_w=torch.tensor(
+      [
+        [[0.21, 0.0, 0.0], [0.0, 0.19, 0.5], [0.0, 0.0, 0.5]],
+        [[0.21, 0.0, 0.0], [0.0, 0.19, 0.5], [0.0, 0.0, 0.5]],
+      ]
+    ),
+    robot_body_pos_w=torch.zeros(2, 3, 3),
+    in_recovery_window=torch.tensor([True, False]),
+  )
+  env = SimpleNamespace(command_manager=SimpleNamespace(get_term=lambda _name: command))
+  feet = ("left_ankle", "right_ankle")
+
+  assert bad_motion_body_pos_xy(env, "motion", 0.2, feet).tolist() == [True, True]
+  assert bad_motion_body_pos_xy_outside_recovery(env, "motion", 0.2, feet).tolist() == [
+    False,
+    True,
+  ]
+
+
+def test_foot_z_termination_is_independent_from_xy_and_uses_015_threshold():
+  command = SimpleNamespace(
+    cfg=SimpleNamespace(body_names=("left_ankle", "right_ankle")),
+    body_pos_relative_w=torch.tensor(
+      [
+        [[0.4, 0.0, 0.14], [0.0, 0.0, 0.0]],
+        [[0.0, 0.0, 0.16], [0.0, 0.0, 0.0]],
+      ]
+    ),
+    robot_body_pos_w=torch.zeros(2, 2, 3),
+  )
+  env = SimpleNamespace(command_manager=SimpleNamespace(get_term=lambda _name: command))
+
+  # A large horizontal error alone does not trip Z; 0.16 m does trip 0.15 m.
+  assert bad_motion_body_pos_z_only(env, "motion", 0.15).tolist() == [False, True]
+
+
 def test_assist_force_event_writes_upward_wrench_for_active_envs_only():
   calls = {}
 
@@ -354,8 +398,8 @@ def test_assist_force_event_writes_upward_wrench_for_active_envs_only():
 
 
 def test_env_cfg_keeps_recovery_as_an_explicit_proxy():
-  from ex_grmt import _stage1_env, _stage2_env
-  from ex_grmt.envs.env_cfg import RECOVERY_PROBABILITY, make_ex_grmt_env_cfg
+  from gmtrack import _stage1_env, _stage2_env
+  from gmtrack.envs.env_cfg import RECOVERY_PROBABILITY, make_gmtrack_env_cfg
 
   for cfg in (_stage1_env(), _stage2_env()):
     motion = cfg.commands["motion"]
@@ -373,8 +417,10 @@ def test_env_cfg_keeps_recovery_as_an_explicit_proxy():
       cfg.terminations["ee_body_pos"].func
       is bad_motion_body_pos_z_only_outside_recovery
     )
+    assert "foot_pos_xy" not in cfg.terminations
+    assert "foot_pos_z" not in cfg.terminations
 
-  proxy = make_ex_grmt_env_cfg(
+  proxy = make_gmtrack_env_cfg(
     manifest=_stage1_env().commands["motion"].manifest,
     recovery_probability=RECOVERY_PROBABILITY,
   )
@@ -392,7 +438,12 @@ def test_recovery_is_a_registered_task_not_a_cli_flag():
   """`recovery_probability` gates term *construction*, so raising it on an
   already-built strict config yields fallen resets and a termination shield with no
   assistance force at all -- RGMT's only mechanism for escaping fallen states."""
-  from ex_grmt import _stage1_env, _stage1_recovery_env
+  from gmtrack import (
+    _stage1_causal_heading_recovery_env,
+    _stage1_causal_recovery_env,
+    _stage1_env,
+    _stage1_recovery_env,
+  )
 
   recovery = _stage1_recovery_env()
   assert recovery.commands["motion"].recovery_probability == 0.15
@@ -400,6 +451,18 @@ def test_recovery_is_a_registered_task_not_a_cli_flag():
   assert "recovery_assist" not in recovery.observations["critic"].terms
   # play stays clean so the task can still be replayed deterministically
   assert _stage1_recovery_env(play=True).commands["motion"].recovery_probability == 0.0
+
+  for causal_recovery_factory in (
+    _stage1_causal_recovery_env,
+    _stage1_causal_heading_recovery_env,
+  ):
+    train = causal_recovery_factory()
+    assert train.commands["motion"].recovery_probability == 0.15
+    assert "recovery_assist" in train.events
+    assert {"foot_pos_xy", "foot_pos_z"} <= set(train.terminations)
+    assert (
+      causal_recovery_factory(play=True).commands["motion"].recovery_probability == 0.0
+    )
 
   # The broken CLI path must now fail loudly instead of training without the force.
   faked_cli = _stage1_env()
@@ -425,10 +488,10 @@ def recovery_env():
   import mjlab.tasks  # noqa: F401
   from mjlab.envs import ManagerBasedRlEnv
 
-  import ex_grmt  # noqa: F401
-  from ex_grmt.envs.env_cfg import make_ex_grmt_env_cfg
+  import gmtrack  # noqa: F401
+  from gmtrack.envs.env_cfg import make_gmtrack_env_cfg
 
-  cfg = make_ex_grmt_env_cfg(
+  cfg = make_gmtrack_env_cfg(
     manifest=str(_MANIFEST),
     recovery_probability=1.0,
   )

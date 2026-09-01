@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import pytest
 
-from ex_grmt.scripts.webplay import _manual_push_velocity_range
+from gmtrack.scripts.webplay import _manual_push_velocity_range
 
 
 @pytest.mark.parametrize(

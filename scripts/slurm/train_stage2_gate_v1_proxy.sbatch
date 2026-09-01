@@ -1,6 +1,6 @@
 #!/bin/bash
 # Short v1-proxy PACE+STAR gate. Full 50k training is forbidden until this passes.
-#SBATCH --job-name=exgrmt-v1p-s2gate
+#SBATCH --job-name=gmtrack-v1p-s2gate
 #SBATCH --output=logs/slurm/%x-%j.out
 #SBATCH --error=logs/slurm/%x-%j.err
 #SBATCH --nodes=1
@@ -15,7 +15,7 @@
 
 set -euo pipefail
 
-PROJECT_DIR="${EX_GRMT_PROJECT_DIR:-<cluster-home>/Ex-GRMT-v1-fix-20260809}"
+PROJECT_DIR="${GMTRACK_PROJECT_DIR:?set GMTRACK_PROJECT_DIR to the checkout to run from}"
 cd "$PROJECT_DIR"
 
 source /public/software/modules/5.4.0/init/bash
@@ -23,7 +23,7 @@ module purge
 module load anaconda3/python3.8
 module load cuda/11.8
 source /public/software/anaconda3/etc/profile.d/conda.sh
-conda activate "${CONDA_ENV_PREFIX:-<cluster-home>/.conda/envs/ex-grmt}"
+conda activate "${CONDA_ENV_PREFIX:?set CONDA_ENV_PREFIX to the conda environment prefix}"
 
 SEED="${SEED:-42}"
 ENVS_PER_GPU="${ENVS_PER_GPU:-1024}"
@@ -39,17 +39,17 @@ mkdir -p "$PROJECT_DIR/logs/slurm"
 for path in "$BASE_CHECKPOINT" "$STRATIFIED" "$MASTERED" "$CHALLENGING"; do test -f "$path"; done
 
 export MUJOCO_GL=egl
-export EX_GRMT_DATA="${EX_GRMT_DATA:-$PROJECT_DIR/data}"
-export EX_GRMT_STRATIFIED_MANIFEST="$STRATIFIED"
-export EX_GRMT_MASTERED_MANIFEST="$MASTERED"
-export EX_GRMT_CHALLENGING_MANIFEST="$CHALLENGING"
+export GMTRACK_DATA="${GMTRACK_DATA:-$PROJECT_DIR/data}"
+export GMTRACK_STRATIFIED_MANIFEST="$STRATIFIED"
+export GMTRACK_MASTERED_MANIFEST="$MASTERED"
+export GMTRACK_CHALLENGING_MANIFEST="$CHALLENGING"
 export PYTHONPATH="$PROJECT_DIR/src:${PYTHONPATH:-}"
 export OMP_NUM_THREADS="${OMP_NUM_THREADS:-2}"
 export PYTHONUNBUFFERED=1
 export NCCL_DEBUG="${NCCL_DEBUG:-WARN}"
 
 ARGS=(
-  ExGRMT-Stage2-Flat-Unitree-G1
+  GMTrack-Stage2-Flat-Unitree-G1
   --env.scene.num-envs "$ENVS_PER_GPU"
   --env.seed "$SEED"
   --agent.seed "$SEED"
@@ -65,9 +65,9 @@ ARGS=(
 
 /opt/gridview/slurm/bin/srun train "${ARGS[@]}"
 
-RUN_DIR="$(find logs/rsl_rl/ex_grmt_stage2 -mindepth 1 -maxdepth 1 -type d -name "*_${RUN_NAME}" -printf '%T@ %p\n' | sort -n | tail -1 | cut -d' ' -f2-)"
+RUN_DIR="$(find logs/rsl_rl/gmtrack_stage2 -mindepth 1 -maxdepth 1 -type d -name "*_${RUN_NAME}" -printf '%T@ %p\n' | sort -n | tail -1 | cut -d' ' -f2-)"
 test -d "$RUN_DIR"
-python -m ex_grmt.scripts.check_stage2_gate \
+python -m gmtrack.scripts.check_stage2_gate \
   --run-dir "$RUN_DIR" \
   --out "$PIPELINE_DIR/gate_report.json" \
   --expected-iterations "$MAX_ITERS"

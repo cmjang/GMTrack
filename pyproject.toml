@@ -1,7 +1,7 @@
 [project]
-name = "ex-grmt"
+name = "gmtrack"
 version = "0.1.0"
-description = "Reproduction of Extreme-RGMT: Continual Learning of Highly Dynamic Skills for Robust Generalist Humanoid Control"
+description = "GMTrack: unofficial reproduction of highly dynamic humanoid motion tracking on the Unitree G1, following Extreme-RGMT (arXiv:2607.20110) with SONIC/BeyondMimic reference values"
 readme = "README.md"
 requires-python = ">=3.10,<3.14"
 dependencies = [
@@ -38,7 +38,7 @@ select = ["E4", "E7", "E9", "F", "I", "B"]
 testpaths = ["tests"]
 
 [project.entry-points."mjlab.tasks"]
-ex_grmt = "ex_grmt"
+gmtrack = "gmtrack"
 
 [tool.uv]
 # `[tool.uv]` is project-local and is NOT inherited from mjlab, so mjlab's torch
@@ -70,7 +70,7 @@ explicit = true
 
 [tool.uv.sources]
 # Local editable checkout of rsl-rl v5.4.0 so we can read/step through the source
-# we subclass in `src/ex_grmt/rsl_rl/`. Must stay at 5.4.0 (mjlab pins it exactly).
+# we subclass in `src/gmtrack/rsl_rl/`. Must stay at 5.4.0 (mjlab pins it exactly).
 rsl-rl-lib = { path = "third_party/rsl_rl", editable = true }
 warp-lang = { index = "nvidia", marker = "sys_platform != 'darwin'" }
 torch = { index = "pytorch-cu128" }

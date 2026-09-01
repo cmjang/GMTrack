@@ -1,9 +1,9 @@
-"""Import and collision-ground AMP_mjlab's recovery clip for Ex-GRMT.
+"""Import and collision-ground AMP_mjlab's recovery clip for GMTrack.
 
 AMP_mjlab uses its recovery asset as an AMP expert/reset-state pool, so the source
 NPZ is not guaranteed to be a collision-consistent tracking reference.  This importer
 keeps the source joint/root motion, raises the complete robot with a smooth upper
-envelope against Ex-GRMT's active G1 collision geometry, refreshes translational body
+envelope against GMTrack's active G1 collision geometry, refreshes translational body
 velocities, and replaces every LAFAN ``fallAndGetUp`` clip in a Stage-I manifest.
 """
 
@@ -17,7 +17,7 @@ from pathlib import Path
 
 import numpy as np
 
-from ex_grmt.motion_grounding import (
+from gmtrack.motion_grounding import (
   DEFAULT_CLEARANCE,
   CorrectionSmoothing,
   G1MotionGrounder,

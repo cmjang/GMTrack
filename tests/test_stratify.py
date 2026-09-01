@@ -7,7 +7,7 @@ from pathlib import Path
 
 import pytest
 
-from ex_grmt.protocol import (
+from gmtrack.protocol import (
   PAPER_SHA256,
   artifact_set_sha256,
   make_stratification_protocol,
@@ -15,7 +15,7 @@ from ex_grmt.protocol import (
   validate_evaluation_manifest,
   validate_stage2_manifests,
 )
-from ex_grmt.scripts.stratify import (
+from gmtrack.scripts.stratify import (
   _artifact_payload,
   _frame_ranges,
   _segment_entries,

@@ -2,7 +2,7 @@
 # Diagnostic handoff of <cluster-user>'s completed Flat/FSQ32 Stage-I checkpoint into
 # the current 2607.20110v1 stratification implementation. This probe has its own
 # pipeline and manifest directories and cannot overwrite the formal seed-42 run.
-#SBATCH --job-name=exgrmt-d29999-strat
+#SBATCH --job-name=gmtrack-d29999-strat
 #SBATCH --output=logs/slurm/%x-%j.out
 #SBATCH --error=logs/slurm/%x-%j.err
 #SBATCH --nodes=1
@@ -17,8 +17,8 @@
 
 set -euo pipefail
 
-PROJECT_DIR="${EX_GRMT_PROJECT_DIR:-<cluster-home>/Ex-GRMT-v1-fix-20260809}"
-DATA_DIR="${EX_GRMT_DATA:-<cluster-home>/Ex-GRMT-v1-fix-20260809-data}"
+PROJECT_DIR="${GMTRACK_PROJECT_DIR:?set GMTRACK_PROJECT_DIR to the checkout to run from}"
+DATA_DIR="${GMTRACK_DATA:-$PROJECT_DIR/data}"
 BASE_CHECKPOINT="${BASE_CHECKPOINT:-$PROJECT_DIR/imported_checkpoints/<cluster-user>_stage1_norecovery_29999/model_29999.pt}"
 SEED="${SEED:-42}"
 PROBE_TAG="${PROBE_TAG:-dong29999-latest-s2-probe-seed${SEED}}"
@@ -43,17 +43,17 @@ module purge
 module load anaconda3/python3.8
 module load cuda/11.8
 source /public/software/anaconda3/etc/profile.d/conda.sh
-conda activate "${CONDA_ENV_PREFIX:-<cluster-home>/.conda/envs/ex-grmt}"
+conda activate "${CONDA_ENV_PREFIX:?set CONDA_ENV_PREFIX to the conda environment prefix}"
 
 export MUJOCO_GL=egl
-export EX_GRMT_DATA="$DATA_DIR"
+export GMTRACK_DATA="$DATA_DIR"
 export PYTHONPATH="$PROJECT_DIR/src:${PYTHONPATH:-}"
 export PYTHONUNBUFFERED=1
 
 realpath "$BASE_CHECKPOINT" > "$PIPELINE_DIR/base_checkpoint.txt"
 printf '%s\n' "$EXPECTED_BASE_SHA256" > "$PIPELINE_DIR/base_checkpoint.sha256"
 
-/opt/gridview/slurm/bin/srun python -m ex_grmt.scripts.stratify \
+/opt/gridview/slurm/bin/srun python -m gmtrack.scripts.stratify \
   --checkpoint "$BASE_CHECKPOINT" \
   --manifest "$SOURCE_MANIFEST" \
   --stratified-manifest "$OUT_DIR/stratified.json" \

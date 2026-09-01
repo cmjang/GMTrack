@@ -4,7 +4,7 @@ import json
 
 import pytest
 
-from ex_grmt.scripts.curate_seed_cartwheel import (
+from gmtrack.scripts.curate_seed_cartwheel import (
   build_balanced_manifest,
   build_heldout_manifest,
   select_balanced_pairs,

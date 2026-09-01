@@ -9,8 +9,8 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-from ex_grmt.motion_grounding import DEFAULT_CLEARANCE, GroundClearanceReport
-from ex_grmt.scripts.audit_ground_clearance import (
+from gmtrack.motion_grounding import DEFAULT_CLEARANCE, GroundClearanceReport
+from gmtrack.scripts.audit_ground_clearance import (
   Config,
   GroundClearanceAuditError,
   audit_manifest,
@@ -180,7 +180,7 @@ def test_main_atomically_writes_failure_report_before_raising(tmp_path, monkeypa
   _write_motion(motion, [-0.01])
   _write_manifest(manifest, motion)
   monkeypatch.setattr(
-    "ex_grmt.scripts.audit_ground_clearance.G1MotionGrounder",
+    "gmtrack.scripts.audit_ground_clearance.G1MotionGrounder",
     _RootHeightGrounder,
   )
 

@@ -38,9 +38,9 @@ def env():
   from mjlab.envs import ManagerBasedRlEnv
   from mjlab.tasks.registry import load_env_cfg
 
-  import ex_grmt  # noqa: F401
+  import gmtrack  # noqa: F401
 
-  cfg = load_env_cfg("ExGRMT-Stage1-Flat-Unitree-G1")
+  cfg = load_env_cfg("GMTrack-Stage1-Flat-Unitree-G1")
   cfg.scene.num_envs = 4
   # Noise off so history frames can be compared exactly.
   for term in cfg.observations["proprio_hist"].terms.values():
@@ -87,17 +87,17 @@ def test_table_ii_ground_friction_range_is_physically_effective(env):
 def test_proprio_history_is_time_ascending_with_newest_last(env):
   """The single most load-bearing layout assumption in the architecture.
 
-  ``ExGRMTActor`` slices ``o_seq[:, -1]`` as ``o_t`` (Eq. 11) and builds the
+  ``GMTrackActor`` slices ``o_seq[:, -1]`` as ``o_t`` (Eq. 11) and builds the
   interleaved history so the final token is ``z_t^o`` (Eq. 6). If mjlab buffered
   history newest-first, both would silently use a 10-step-stale observation.
   """
   from mjlab.envs.mdp.observations import joint_pos_rel
 
-  from ex_grmt.envs.env_cfg import HISTORY_LENGTH
-  from ex_grmt.rsl_rl.config import ExGRMTActorCfg
+  from gmtrack.envs.env_cfg import HISTORY_LENGTH
+  from gmtrack.rsl_rl.config import GMTrackActorCfg
 
   h = HISTORY_LENGTH
-  dims = ExGRMTActorCfg().proprio_term_dims
+  dims = GMTrackActorCfg().proprio_term_dims
 
   env.reset()
   for _ in range(h + 3):
@@ -131,7 +131,7 @@ def test_command_window_centre_is_the_current_reference(env):
   index, and the following ``process_action`` reads that same index. Observation and
   action are therefore aligned -- this test pins that alignment.
   """
-  from ex_grmt.envs.env_cfg import COMMAND_WINDOW_RADIUS
+  from gmtrack.envs.env_cfg import COMMAND_WINDOW_RADIUS
 
   cmd = env.command_manager.get_term("motion")
   env.reset()
@@ -179,7 +179,7 @@ def test_action_and_observation_share_a_reference_index(env):
   A one-frame slip here is invisible at 50 Hz -- errors stay small and training still
   converges -- but the policy would be correcting toward the wrong target.
   """
-  from ex_grmt.envs.env_cfg import COMMAND_WINDOW_RADIUS
+  from gmtrack.envs.env_cfg import COMMAND_WINDOW_RADIUS
 
   cmd = env.command_manager.get_term("motion")
   term = env.action_manager.get_term("joint_pos")

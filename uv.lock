@@ -588,7 +588,7 @@ epath = [
 ]
 
 [[package]]
-name = "ex-grmt"
+name = "gmtrack"
 version = "0.1.0"
 source = { editable = "." }
 dependencies = [

@@ -8,8 +8,8 @@ import numpy as np
 import pytest
 import torch
 
-from ex_grmt.mdp.motion_library import MotionLibrary
-from ex_grmt.mdp.sampling import AdaptiveBinSampler
+from gmtrack.mdp.motion_library import MotionLibrary
+from gmtrack.mdp.sampling import AdaptiveBinSampler
 
 NUM_BODIES = 4
 NUM_JOINTS = 5

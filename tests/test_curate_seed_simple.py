@@ -5,7 +5,7 @@ import json
 
 import pytest
 
-from ex_grmt.scripts.curate_seed_simple import _parser, merge
+from gmtrack.scripts.curate_seed_simple import _parser, merge
 
 
 def test_merge_defaults_use_complete_sequence_manifests():

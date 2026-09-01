@@ -6,8 +6,8 @@ import pytest
 import torch
 from tensordict import TensorDict
 
-from ex_grmt.rsl_rl.fsq import FSQ, SONIC_PROXY_FSQ_LEVELS
-from ex_grmt.rsl_rl.models import (
+from gmtrack.rsl_rl.fsq import FSQ, SONIC_PROXY_FSQ_LEVELS
+from gmtrack.rsl_rl.models import (
   ACTION_HIST,
   COMMAND_WINDOW,
   FUTURE_RECONSTRUCTION_TARGET,
@@ -15,7 +15,7 @@ from ex_grmt.rsl_rl.models import (
   HISTORY_VALID_MASK,
   PAST_VALID_MASK,
   PROPRIO_HIST,
-  ExGRMTActor,
+  GMTrackActor,
   sinusoidal_positional_encoding,
   sinusoidal_positional_encoding_at,
 )
@@ -61,11 +61,9 @@ def _actor(
   command_tokens: int = TOKENS,
   use_command_valid_mask: bool = False,
   **kw,
-) -> ExGRMTActor:
-  return ExGRMTActor(
-    obs=_obs(
-      tokens=command_tokens, with_valid_mask=use_command_valid_mask
-    ),
+) -> GMTrackActor:
+  return GMTrackActor(
+    obs=_obs(tokens=command_tokens, with_valid_mask=use_command_valid_mask),
     obs_groups=_groups(use_command_valid_mask),
     obs_set="actor",
     output_dim=ACTION_DIM,
@@ -90,6 +88,34 @@ def test_latent_is_proprio_action_and_bottleneck():
   assert actor._get_latent_dim() == PROPRIO_DIM + ACTION_DIM + actor.token_dim
   latent = actor.get_latent(_obs())
   assert latent.shape == (BATCH, PROPRIO_DIM + ACTION_DIM + actor.token_dim)
+
+
+def test_causal_intent_mean_is_deterministic_actor_input_and_receives_policy_gradients():
+  actor = _actor(
+    use_intent_aux=True,
+    use_intent_in_actor=True,
+    intent_latent_dim=32,
+    future_reconstruction_offsets=(5, 10, 20),
+  )
+  obs = _obs()
+
+  expected_dim = PROPRIO_DIM + ACTION_DIM + actor.token_dim + 32
+  assert actor._get_latent_dim() == expected_dim
+  first = actor.get_latent(obs)
+  second = actor.get_latent(obs)
+  assert first.shape == (BATCH, expected_dim)
+  torch.testing.assert_close(first, second)
+
+  actor(obs).square().mean().backward()
+  assert actor.intent_posterior is not None
+  posterior_params = list(actor.intent_posterior.parameters())
+  assert posterior_params
+  assert all(parameter.grad is not None for parameter in posterior_params)
+
+
+def test_intent_actor_requires_future_supervised_intent_branch():
+  with pytest.raises(ValueError, match="requires use_intent_aux=True"):
+    _actor(use_intent_in_actor=True)
 
 
 def test_default_fsq_matches_sonic_two_by_thirty_two_proxy():
@@ -196,9 +222,7 @@ def test_mask_does_not_change_parameters_so_checkpoint_needs_schema_guard():
     command_window_offsets=tuple(range(-20, 1)),
   )
 
-  baseline_shapes = {
-    name: value.shape for name, value in baseline.state_dict().items()
-  }
+  baseline_shapes = {name: value.shape for name, value in baseline.state_dict().items()}
   causal_shapes = {name: value.shape for name, value in causal.state_dict().items()}
   assert causal_shapes == baseline_shapes
   causal.load_state_dict(baseline.state_dict(), strict=True)
@@ -313,10 +337,33 @@ def test_intent_auxiliary_is_not_an_export_input():
   assert exported(*exported.get_dummy_inputs()).shape == (1, ACTION_DIM)
 
 
+def test_intent_conditioned_actor_export_keeps_external_inputs_causal():
+  offsets = (-32, -24, -16, -12, -8, -6, -4, -3, -2, -1, 0)
+  actor = _actor(
+    command_tokens=len(offsets),
+    use_command_valid_mask=True,
+    command_window_offsets=offsets,
+    use_intent_aux=True,
+    use_intent_in_actor=True,
+    future_reconstruction_offsets=(5, 10, 20),
+  )
+  exported = actor.as_onnx()
+
+  assert exported.input_names == [
+    PROPRIO_HIST,
+    ACTION_HIST,
+    COMMAND_WINDOW,
+    HISTORY_VALID_MASK,
+    PAST_VALID_MASK,
+  ]
+  assert exported.core.use_intent_in_actor is True
+  assert exported(*exported.get_dummy_inputs()).shape == (1, ACTION_DIM)
+
+
 def test_export_survives_a_backward_pass():
   """Regression: the distribution caches graph-attached tensors after a forward pass.
 
-  ``ExGRMTActor.as_onnx`` deep-copies the whole module (unlike upstream, which only
+  ``GMTrackActor.as_onnx`` deep-copies the whole module (unlike upstream, which only
   copies the trunk), so it has to detach the distribution first or export silently
   fails on every checkpoint save.
   """
@@ -348,7 +395,7 @@ def test_export_matches_deterministic_forward():
 
 def test_rejects_wrong_observation_group_order():
   with pytest.raises(ValueError, match="Order matters"):
-    ExGRMTActor(
+    GMTrackActor(
       obs=_obs(),
       obs_groups={"actor": [ACTION_HIST, PROPRIO_HIST, COMMAND_WINDOW]},
       obs_set="actor",
@@ -361,7 +408,7 @@ def test_rejects_history_dimension_mismatch():
   obs = _obs()
   obs[PROPRIO_HIST] = torch.randn(BATCH, H * PROPRIO_DIM + 1)
   with pytest.raises(ValueError, match="proprio_term_dims"):
-    ExGRMTActor(
+    GMTrackActor(
       obs=obs,
       obs_groups=_groups(),
       obs_set="actor",

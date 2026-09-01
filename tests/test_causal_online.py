@@ -8,7 +8,7 @@ import pytest
 import torch
 from mjlab.tasks.registry import list_tasks, load_env_cfg, load_rl_cfg
 
-from ex_grmt.envs.env_cfg import (
+from gmtrack.envs.env_cfg import (
   CAUSAL_ACTOR_WINDOW_OFFSETS,
   CAUSAL_CRITIC_WINDOW_OFFSETS,
   CAUSAL_RECONSTRUCTION_OFFSETS,
@@ -17,45 +17,52 @@ from ex_grmt.envs.env_cfg import (
   HISTORY_LENGTH,
   TRACKED_BODIES,
   command_window_noise,
-  make_ex_grmt_env_cfg,
+  make_gmtrack_env_cfg,
 )
-from ex_grmt.mdp.commands import (
+from gmtrack.mdp.commands import (
   MultiMotionCommandCfg,
   _parse_critic_window_offsets,
   _parse_reconstruction_window_offsets,
   _parse_window_offsets,
 )
-from ex_grmt.mdp.motion_library import MotionLibrary
-from ex_grmt.mdp.observations import (
+from gmtrack.mdp.motion_library import MotionLibrary
+from gmtrack.mdp.observations import (
   executed_history_valid_mask,
   motion_command_future_valid_mask,
   motion_command_past_valid_mask,
   motion_command_token,
 )
-from ex_grmt.rl_cfgs import INTENT_KL_COEF, INTENT_RECONSTRUCTION_COEF
+from gmtrack.mdp.terminations import (
+  bad_motion_body_pos_xy_outside_recovery,
+  bad_motion_body_pos_z_only_outside_recovery,
+)
+from gmtrack.rl_cfgs import INTENT_KL_COEF, INTENT_RECONSTRUCTION_COEF
 
-BASE_STAGE1 = "ExGRMT-Stage1-Flat-Unitree-G1"
-CAUSAL_STAGE1 = "ExGRMT-Stage1-Causal-Flat-Unitree-G1"
-CAUSAL_STAGE2 = "ExGRMT-Stage2-Causal-Flat-Unitree-G1"
+BASE_STAGE1 = "GMTrack-Stage1-Flat-Unitree-G1"
+CAUSAL_STAGE1 = "GMTrack-Stage1-Causal-Flat-Unitree-G1"
+CAUSAL_RECOVERY_STAGE1 = "GMTrack-Stage1-Causal-Recovery-Flat-Unitree-G1"
+CAUSAL_NOMASK_STAGE1 = "GMTrack-Stage1-CausalNoMask-Flat-Unitree-G1"
+CAUSAL_STAGE2 = "GMTrack-Stage2-Causal-Flat-Unitree-G1"
 TOKEN_DIM = 38
+REGISTERED_CAUSAL_TOKEN_DIM = 44
 CAUSAL_ACTOR_OFFSETS = (-32, -24, -16, -12, -8, -6, -4, -3, -2, -1, 0)
 CAUSAL_CRITIC_OFFSETS = (1, 2, 4, 8, 16, 32, 64)
 CAUSAL_RECONSTRUCTION_TARGETS = (5, 10, 20)
 
 LEGACY_TASKS = (
-  "ExGRMT-Stage1-Flat-Unitree-G1",
-  "ExGRMT-Stage1-Recovery-Flat-Unitree-G1",
-  "ExGRMT-Stage1-Heading-Flat-Unitree-G1",
-  "ExGRMT-Stage1-Heading-Recovery-Flat-Unitree-G1",
-  "ExGRMT-Stage2-Flat-Unitree-G1",
-  "ExGRMT-Stage2-Heading-Flat-Unitree-G1",
-  "ExGRMT-Stage2-NoStar-Flat-Unitree-G1",
-  "ExGRMT-Stage2-NoCon-Flat-Unitree-G1",
-  "ExGRMT-Stage2-FixedLambda-Flat-Unitree-G1",
-  "ExGRMT-Stage2-UnifiedEnc-Flat-Unitree-G1",
-  "ExGRMT-Stage2-NoFSQ-Flat-Unitree-G1",
-  "ExGRMT-Finetune-Flat-Unitree-G1",
-  "ExGRMT-MixedTraining-Flat-Unitree-G1",
+  "GMTrack-Stage1-Flat-Unitree-G1",
+  "GMTrack-Stage1-Recovery-Flat-Unitree-G1",
+  "GMTrack-Stage1-Heading-Flat-Unitree-G1",
+  "GMTrack-Stage1-Heading-Recovery-Flat-Unitree-G1",
+  "GMTrack-Stage2-Flat-Unitree-G1",
+  "GMTrack-Stage2-Heading-Flat-Unitree-G1",
+  "GMTrack-Stage2-NoStar-Flat-Unitree-G1",
+  "GMTrack-Stage2-NoCon-Flat-Unitree-G1",
+  "GMTrack-Stage2-FixedLambda-Flat-Unitree-G1",
+  "GMTrack-Stage2-UnifiedEnc-Flat-Unitree-G1",
+  "GMTrack-Stage2-NoFSQ-Flat-Unitree-G1",
+  "GMTrack-Finetune-Flat-Unitree-G1",
+  "GMTrack-MixedTraining-Flat-Unitree-G1",
 )
 
 
@@ -87,7 +94,7 @@ def _critic_dim(token_dim: int) -> int:
 
 
 def test_causal_actor_uses_exact_sparse_past_only_layout():
-  cfg = make_ex_grmt_env_cfg(manifest="unused.json", causal_online=True)
+  cfg = make_gmtrack_env_cfg(manifest="unused.json", causal_online=True)
   motion = cfg.commands["motion"]
 
   assert CAUSAL_ACTOR_WINDOW_OFFSETS == CAUSAL_ACTOR_OFFSETS
@@ -100,7 +107,7 @@ def test_causal_actor_uses_exact_sparse_past_only_layout():
 
 
 def test_causal_critic_uses_exact_strictly_future_layout():
-  cfg = make_ex_grmt_env_cfg(manifest="unused.json", causal_online=True)
+  cfg = make_gmtrack_env_cfg(manifest="unused.json", causal_online=True)
   motion = cfg.commands["motion"]
 
   assert CAUSAL_CRITIC_WINDOW_OFFSETS == CAUSAL_CRITIC_OFFSETS
@@ -111,7 +118,7 @@ def test_causal_critic_uses_exact_strictly_future_layout():
 
 
 def test_causal_intent_targets_and_public_loss_weights_are_enabled():
-  env_cfg = make_ex_grmt_env_cfg(manifest="unused.json", causal_online=True)
+  env_cfg = make_gmtrack_env_cfg(manifest="unused.json", causal_online=True)
   motion = env_cfg.commands["motion"]
   runner_cfg = load_rl_cfg(CAUSAL_STAGE1)
 
@@ -120,25 +127,20 @@ def test_causal_intent_targets_and_public_loss_weights_are_enabled():
   assert tuple(env_cfg.observations["future_reconstruction_target"].terms) == (
     "target",
   )
-  assert tuple(
-    env_cfg.observations["future_reconstruction_valid_mask"].terms
-  ) == ("mask",)
+  assert tuple(env_cfg.observations["future_reconstruction_valid_mask"].terms) == (
+    "mask",
+  )
   assert runner_cfg.actor.use_intent_aux is True
   assert runner_cfg.actor.intent_latent_dim == 64
+  assert runner_cfg.actor.future_reconstruction_offsets == CAUSAL_RECONSTRUCTION_TARGETS
   assert (
-    runner_cfg.actor.future_reconstruction_offsets
-    == CAUSAL_RECONSTRUCTION_TARGETS
-  )
-  assert (
-    runner_cfg.algorithm.intent_reconstruction_coef
-    == INTENT_RECONSTRUCTION_COEF
-    == 0.5
+    runner_cfg.algorithm.intent_reconstruction_coef == INTENT_RECONSTRUCTION_COEF == 0.5
   )
   assert runner_cfg.algorithm.intent_kl_coef == INTENT_KL_COEF == 0.0005
 
 
 def test_command_noise_width_tracks_configured_actor_window():
-  cfg = make_ex_grmt_env_cfg(manifest="unused.json", causal_online=True)
+  cfg = make_gmtrack_env_cfg(manifest="unused.json", causal_online=True)
   motion = cfg.commands["motion"]
   noise = cfg.observations["command_window"].terms["window"].params["magnitude"]
 
@@ -208,9 +210,7 @@ def test_motion_command_token_uses_the_actual_zero_offset_position():
     window_offsets=offsets,
     command_window=lambda: tokens,
   )
-  env = SimpleNamespace(
-    command_manager=SimpleNamespace(get_term=lambda _name: command)
-  )
+  env = SimpleNamespace(command_manager=SimpleNamespace(get_term=lambda _name: command))
 
   actual = motion_command_token(env, "motion")
   torch.testing.assert_close(actual, torch.tensor([[10.0]]))
@@ -221,9 +221,7 @@ def test_motion_command_token_rejects_a_window_without_current_frame():
     window_offsets=torch.tensor([-2, -1]),
     command_window=lambda: torch.zeros(1, 2, 1),
   )
-  env = SimpleNamespace(
-    command_manager=SimpleNamespace(get_term=lambda _name: command)
-  )
+  env = SimpleNamespace(command_manager=SimpleNamespace(get_term=lambda _name: command))
 
   with pytest.raises(ValueError, match="exactly one offset 0"):
     motion_command_token(env, "motion")
@@ -236,9 +234,7 @@ def test_observation_mask_terms_forward_command_masks_without_coercion():
     command_window_valid_mask=lambda: past_mask,
     critic_command_window_valid_mask=lambda: future_mask,
   )
-  env = SimpleNamespace(
-    command_manager=SimpleNamespace(get_term=lambda _name: command)
-  )
+  env = SimpleNamespace(command_manager=SimpleNamespace(get_term=lambda _name: command))
 
   assert motion_command_past_valid_mask(env, "motion") is past_mask
   assert motion_command_future_valid_mask(env, "motion") is future_mask
@@ -294,7 +290,7 @@ def test_valid_masks_use_physical_parent_not_logical_fragment_boundaries():
 
 def test_existing_default_task_observation_dimensions_remain_unchanged():
   """Pin the pre-change G1 actor groups and privileged critic width."""
-  cfg = make_ex_grmt_env_cfg(manifest="unused.json")
+  cfg = make_gmtrack_env_cfg(manifest="unused.json")
   motion = cfg.commands["motion"]
   assert motion.command_window_offsets is None
   assert motion.critic_window_offsets is None
@@ -352,9 +348,10 @@ def test_every_registered_legacy_task_keeps_observation_contract(task_id):
     "critic",
     "star",
   )
-  assert len(
-    env_cfg.observations["command_window"].terms["window"].params["magnitude"]
-  ) == 21 * token_dim
+  assert (
+    len(env_cfg.observations["command_window"].terms["window"].params["magnitude"])
+    == 21 * token_dim
+  )
   assert _critic_dim(token_dim) == (267 if heading else 261)
   assert rl_cfg.obs_groups["actor"] == (
     "proprio_hist",
@@ -370,7 +367,9 @@ def test_causal_tasks_are_registered_with_asymmetric_critic_inputs():
   tasks = list_tasks()
   assert BASE_STAGE1 in tasks
   assert CAUSAL_STAGE1 in tasks
-  assert CAUSAL_STAGE2 in tasks
+  assert CAUSAL_STAGE2 not in tasks
+  assert "GMTrack-Stage1-Causal-Heading-Flat-Unitree-G1" not in tasks
+  assert "GMTrack-Stage1-Causal-Heading-Recovery-Flat-Unitree-G1" not in tasks
 
   baseline_env = load_env_cfg(BASE_STAGE1)
   causal_env = load_env_cfg(CAUSAL_STAGE1)
@@ -380,7 +379,10 @@ def test_causal_tasks_are_registered_with_asymmetric_critic_inputs():
   assert baseline_env.commands["motion"].command_window_offsets is None
   assert causal_env.commands["motion"].command_window_offsets == CAUSAL_ACTOR_OFFSETS
   assert causal_env.commands["motion"].critic_window_offsets == CAUSAL_CRITIC_OFFSETS
+  assert causal_env.commands["motion"].heading_closed_loop is True
+  assert causal_env.commands["motion"].pose_range == {"yaw": (-0.2, 0.2)}
   assert baseline_rl.actor.use_command_valid_mask is False
+  assert causal_rl.actor.command_token_dim == REGISTERED_CAUSAL_TOKEN_DIM
   assert baseline_rl.obs_groups["actor"] == (
     "proprio_hist",
     "action_hist",
@@ -404,25 +406,75 @@ def test_causal_tasks_are_registered_with_asymmetric_critic_inputs():
     "future_valid_mask",
   )
   causal_actor_dim = (
-    640 + 290 + len(CAUSAL_ACTOR_OFFSETS) * TOKEN_DIM + HISTORY_LENGTH + 11
+    640
+    + 290
+    + len(CAUSAL_ACTOR_OFFSETS) * REGISTERED_CAUSAL_TOKEN_DIM
+    + HISTORY_LENGTH
+    + 11
   )
   causal_critic_dim = (
     640
     + 290
     + HISTORY_LENGTH
-    + _critic_dim(TOKEN_DIM)
-    + len(CAUSAL_CRITIC_OFFSETS) * TOKEN_DIM
+    + _critic_dim(REGISTERED_CAUSAL_TOKEN_DIM)
+    + len(CAUSAL_CRITIC_OFFSETS) * REGISTERED_CAUSAL_TOKEN_DIM
     + len(CAUSAL_CRITIC_OFFSETS)
   )
-  assert causal_actor_dim == 1369
-  assert causal_critic_dim == 1474
-  assert causal_rl.experiment_name == "ex_grmt_stage1_causal"
-  assert load_rl_cfg(CAUSAL_STAGE2).experiment_name == "ex_grmt_stage2_causal"
+  assert causal_actor_dim == 1435
+  assert causal_critic_dim == 1522
+  assert causal_rl.experiment_name == "gmtrack_stage1_causal_heading"
 
 
-def test_causal_rewards_and_terminations_remain_unchanged():
-  baseline = make_ex_grmt_env_cfg(manifest="unused.json")
-  causal = make_ex_grmt_env_cfg(manifest="unused.json", causal_online=True)
+def test_every_registered_causal_name_defaults_to_heading():
+  for task_id in (CAUSAL_STAGE1, CAUSAL_RECOVERY_STAGE1, CAUSAL_NOMASK_STAGE1):
+    env_cfg = load_env_cfg(task_id)
+    rl_cfg = load_rl_cfg(task_id)
+
+    assert env_cfg.commands["motion"].heading_closed_loop is True
+    assert env_cfg.commands["motion"].pose_range == {"yaw": (-0.2, 0.2)}
+    assert rl_cfg.actor.command_token_dim == REGISTERED_CAUSAL_TOKEN_DIM
+
+
+def test_registered_stage1_causal_adds_only_the_sonic_foot_terminations():
+  baseline = load_env_cfg(BASE_STAGE1)
+  causal = load_env_cfg(CAUSAL_STAGE1)
 
   assert causal.rewards == baseline.rewards
-  assert causal.terminations == baseline.terminations
+  assert set(causal.terminations) == set(baseline.terminations) | {
+    "foot_pos_xy",
+    "foot_pos_z",
+  }
+  assert all(
+    causal.terminations[name] == term for name, term in baseline.terminations.items()
+  )
+  foot_xy = causal.terminations["foot_pos_xy"]
+  assert foot_xy.func is bad_motion_body_pos_xy_outside_recovery
+  assert foot_xy.params["threshold"] == 0.2
+  foot_z = causal.terminations["foot_pos_z"]
+  assert foot_z.func is bad_motion_body_pos_z_only_outside_recovery
+  assert foot_z.params["threshold"] == 0.15
+
+  # Causal Stage II stays unavailable until a matching causal + Heading split exists.
+  stage2 = load_env_cfg("GMTrack-Stage2-Flat-Unitree-G1")
+  assert "foot_pos_xy" not in stage2.terminations
+  assert "foot_pos_z" not in stage2.terminations
+
+
+def test_causal_recovery_task_constructs_the_full_recovery_protocol():
+  train = load_env_cfg(CAUSAL_RECOVERY_STAGE1)
+  play = load_env_cfg(CAUSAL_RECOVERY_STAGE1, play=True)
+  runner = load_rl_cfg(CAUSAL_RECOVERY_STAGE1)
+
+  assert CAUSAL_RECOVERY_STAGE1 in list_tasks()
+  assert train.commands["motion"].require_causal_window is True
+  assert train.commands["motion"].heading_closed_loop is True
+  assert train.commands["motion"].pose_range == {"yaw": (-0.2, 0.2)}
+  assert train.commands["motion"].recovery_probability == 0.15
+  assert "recovery_assist" in train.events
+  assert train.events["recovery_assist"].mode == "step"
+  assert {"foot_pos_xy", "foot_pos_z"} <= set(train.terminations)
+  assert play.commands["motion"].recovery_probability == 0.0
+  assert play.commands["motion"].pose_range == {}
+  assert "recovery_assist" in play.events
+  assert runner.actor.command_token_dim == REGISTERED_CAUSAL_TOKEN_DIM
+  assert runner.experiment_name == "gmtrack_stage1_causal_heading_recovery"

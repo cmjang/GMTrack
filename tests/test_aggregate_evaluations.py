@@ -5,8 +5,8 @@ from pathlib import Path
 
 import pytest
 
-from ex_grmt.provenance import PAPER_ID, PAPER_SHA256
-from ex_grmt.scripts.aggregate_evaluations import aggregate
+from gmtrack.provenance import PAPER_ID, PAPER_SHA256
+from gmtrack.scripts.aggregate_evaluations import aggregate
 
 
 def _write_result(path: Path, seed: int, value: float) -> str:

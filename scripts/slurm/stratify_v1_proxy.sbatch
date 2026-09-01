@@ -1,6 +1,6 @@
 #!/bin/bash
 # 2607.20110v1 Sec. IV-C: <=10 s clips, five randomized rollouts, >=80% mastered.
-#SBATCH --job-name=exgrmt-v1p-strat
+#SBATCH --job-name=gmtrack-v1p-strat
 #SBATCH --output=logs/slurm/%x-%j.out
 #SBATCH --error=logs/slurm/%x-%j.err
 #SBATCH --nodes=1
@@ -15,7 +15,7 @@
 
 set -euo pipefail
 
-PROJECT_DIR="${EX_GRMT_PROJECT_DIR:-<cluster-home>/Ex-GRMT-v1-fix-20260809}"
+PROJECT_DIR="${GMTRACK_PROJECT_DIR:?set GMTRACK_PROJECT_DIR to the checkout to run from}"
 cd "$PROJECT_DIR"
 
 source /public/software/modules/5.4.0/init/bash
@@ -23,11 +23,11 @@ module purge
 module load anaconda3/python3.8
 module load cuda/11.8
 source /public/software/anaconda3/etc/profile.d/conda.sh
-conda activate "${CONDA_ENV_PREFIX:-<cluster-home>/.conda/envs/ex-grmt}"
+conda activate "${CONDA_ENV_PREFIX:?set CONDA_ENV_PREFIX to the conda environment prefix}"
 
 SEED="${SEED:-42}"
 PIPELINE_DIR="$PROJECT_DIR/logs/pipeline/v1-final-backflip-seed${SEED}"
-DATA_DIR="${EX_GRMT_DATA:-$PROJECT_DIR/data}"
+DATA_DIR="${GMTRACK_DATA:-$PROJECT_DIR/data}"
 OUT_DIR="$PROJECT_DIR/logs/legacy_manifests/v1-final-backflip-seed${SEED}"
 BASE_CHECKPOINT="${BASE_CHECKPOINT:-$(<"$PIPELINE_DIR/base_checkpoint.txt")}"
 SOURCE_MANIFEST="$DATA_DIR/current/stage1_paper_mix_final_backflip_cartwheel_balanced_grounded_no_fall_getup.json"
@@ -35,11 +35,11 @@ SOURCE_MANIFEST="$DATA_DIR/current/stage1_paper_mix_final_backflip_cartwheel_bal
 mkdir -p "$PROJECT_DIR/logs/slurm" "$OUT_DIR"
 test -f "$BASE_CHECKPOINT"
 export MUJOCO_GL=egl
-export EX_GRMT_DATA="$DATA_DIR"
+export GMTRACK_DATA="$DATA_DIR"
 export PYTHONPATH="$PROJECT_DIR/src:${PYTHONPATH:-}"
 export PYTHONUNBUFFERED=1
 
-/opt/gridview/slurm/bin/srun python -m ex_grmt.scripts.stratify \
+/opt/gridview/slurm/bin/srun python -m gmtrack.scripts.stratify \
   --checkpoint "$BASE_CHECKPOINT" \
   --manifest "$SOURCE_MANIFEST" \
   --stratified-manifest "$OUT_DIR/stratified.json" \

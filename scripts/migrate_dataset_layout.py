@@ -14,7 +14,7 @@ import os
 from pathlib import Path
 from typing import Any
 
-from ex_grmt.protocol import artifact_set_sha256, sha256_file, validate_stage2_manifests
+from gmtrack.protocol import artifact_set_sha256, sha256_file, validate_stage2_manifests
 
 FORMAL_SOURCE = (
   "stage1_paper_mix_final_backflip_cartwheel_balanced_grounded_no_fall_getup.json"

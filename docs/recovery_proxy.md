@@ -3,7 +3,7 @@
 本文件只记录 RGMT `arXiv:2601.23080v1` Sec. II-D 的恢复协议，以及本仓库为了把“随机不稳定姿态”落到运行时所作的本地假设。
 
 严格任务默认 `recovery_probability = 0`。只有专门的
-`ExGRMT-Stage1-Recovery-Flat-Unitree-G1` 才开启这个机制。
+`GMTrack-Stage1-Recovery-Flat-Unitree-G1` 才开启这个机制。
 
 ## 论文契约
 

@@ -6,8 +6,8 @@ import pytest
 import torch
 from tensordict import TensorDict
 
-from ex_grmt.pace import pace_env_split
-from ex_grmt.rsl_rl.storage import STAR_GROUP, StarRolloutStorage
+from gmtrack.pace import pace_env_split
+from gmtrack.rsl_rl.storage import STAR_GROUP, StarRolloutStorage
 
 T, N, A = 6, 8, 3
 

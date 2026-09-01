@@ -5,8 +5,8 @@ from __future__ import annotations
 import pytest
 import torch
 
-from ex_grmt.mdp.commands import _clamp_training_start_frame
-from ex_grmt.mdp.sampling import AdaptiveBinSampler
+from gmtrack.mdp.commands import _clamp_training_start_frame
+from gmtrack.mdp.sampling import AdaptiveBinSampler
 
 
 def _sampler(**kwargs) -> AdaptiveBinSampler:

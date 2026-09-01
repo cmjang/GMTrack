@@ -5,8 +5,8 @@ from __future__ import annotations
 import mujoco
 import pytest
 
-from ex_grmt.assets import get_instinct_collision_g1_spec
-from ex_grmt.scripts.prepare_motions import G1_JOINT_ORDER
+from gmtrack.assets import get_instinct_collision_g1_spec
+from gmtrack.scripts.prepare_motions import G1_JOINT_ORDER
 
 
 @pytest.fixture(scope="module")
@@ -20,7 +20,7 @@ def _geom(model: mujoco.MjModel, name: str) -> int:
   return geom_id
 
 
-def test_instinct_collision_profile_preserves_ex_grmt_kinematics(model):
+def test_instinct_collision_profile_preserves_gmtrack_kinematics(model):
   """Only collisions change; motion tensors and policy I/O keep their joint order."""
   assert model.body(1).name == "pelvis"
   assert tuple(model.joint(i).name for i in range(1, model.njnt)) == G1_JOINT_ORDER
@@ -74,17 +74,17 @@ def _compiled_actuator_table(monkeypatch, effort: str | None):
   """(kp, kd, forcerange, armature) per joint, plus the ctrl->joint order."""
   import importlib
 
-  import ex_grmt.assets.unitree_g1 as unitree_g1
+  import gmtrack.assets.unitree_g1 as unitree_g1
 
   if effort is None:
-    monkeypatch.delenv("EX_GRMT_HIP_PITCH_EFFORT", raising=False)
+    monkeypatch.delenv("GMTRACK_HIP_PITCH_EFFORT", raising=False)
   else:
-    monkeypatch.setenv("EX_GRMT_HIP_PITCH_EFFORT", effort)
+    monkeypatch.setenv("GMTRACK_HIP_PITCH_EFFORT", effort)
   importlib.reload(unitree_g1)
 
   from mjlab.entity import Entity
 
-  model = Entity(unitree_g1.get_ex_grmt_g1_robot_cfg()).spec.compile()
+  model = Entity(unitree_g1.get_gmtrack_g1_robot_cfg()).spec.compile()
   joints = [
     mujoco.mj_id2name(model, mujoco.mjtObj.mjOBJ_JOINT, i).split("/")[-1]
     for i in range(model.njnt)
@@ -114,11 +114,11 @@ def test_hip_pitch_override_leaves_the_action_scale_alone(monkeypatch):
 
   from mjlab.asset_zoo.robots import G1_ACTION_SCALE
 
-  import ex_grmt.envs.env_cfg as env_cfg
+  import gmtrack.envs.env_cfg as env_cfg
 
-  monkeypatch.setenv("EX_GRMT_HIP_PITCH_EFFORT", "139")
+  monkeypatch.setenv("GMTRACK_HIP_PITCH_EFFORT", "139")
   importlib.reload(env_cfg)
-  cfg = env_cfg.make_ex_grmt_env_cfg(manifest="unused.json")
+  cfg = env_cfg.make_gmtrack_env_cfg(manifest="unused.json")
   scale = cfg.actions["joint_pos"].scale
 
   assert scale == G1_ACTION_SCALE
@@ -137,7 +137,7 @@ def test_default_path_keeps_mjlabs_exact_actuator_layout(monkeypatch):
   """
   from mjlab.asset_zoo.robots import get_g1_robot_cfg
 
-  import ex_grmt.assets.unitree_g1 as unitree_g1
+  import gmtrack.assets.unitree_g1 as unitree_g1
 
   pristine = get_g1_robot_cfg()
   pristine.spec_fn = unitree_g1.get_instinct_collision_g1_spec
@@ -173,9 +173,9 @@ def test_hip_pitch_override_touches_hip_pitch_only(monkeypatch):
 def test_hip_pitch_effort_override_rejects_nonsense(monkeypatch):
   import importlib
 
-  import ex_grmt.assets.unitree_g1 as unitree_g1
+  import gmtrack.assets.unitree_g1 as unitree_g1
 
-  monkeypatch.setenv("EX_GRMT_HIP_PITCH_EFFORT", "0")
+  monkeypatch.setenv("GMTRACK_HIP_PITCH_EFFORT", "0")
   importlib.reload(unitree_g1)
   with pytest.raises(ValueError, match="must be positive"):
     unitree_g1.hip_pitch_effort_limit()

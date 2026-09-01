@@ -1,4 +1,4 @@
-"""Checkpoint-state tests for the ExGRMT runner extensions."""
+"""Checkpoint-state tests for the GMTrack runner extensions."""
 
 from __future__ import annotations
 
@@ -9,13 +9,13 @@ import pytest
 import torch
 from mjlab.rl.runner import MjlabOnPolicyRunner
 
-from ex_grmt.mdp.sampling import AdaptiveBinSampler
-from ex_grmt.rsl_rl.runner import ExGRMTOnPolicyRunner
-from ex_grmt.rsl_rl.storage import TRACKING_FAILURES_EXTRA
+from gmtrack.mdp.sampling import AdaptiveBinSampler
+from gmtrack.rsl_rl.runner import GMTrackOnPolicyRunner
+from gmtrack.rsl_rl.storage import TRACKING_FAILURES_EXTRA
 
 
-def _runner_with_command(command) -> ExGRMTOnPolicyRunner:
-  runner = object.__new__(ExGRMTOnPolicyRunner)
+def _runner_with_command(command) -> GMTrackOnPolicyRunner:
+  runner = object.__new__(GMTrackOnPolicyRunner)
   runner._motion_command = lambda: command  # type: ignore[method-assign]
   return runner
 
@@ -42,7 +42,7 @@ def test_runner_injects_true_terminated_mask_before_ppo_sees_combined_done():
     def step(_actions):
       return "obs", torch.zeros(2), torch.tensor([1, 0]), extras
 
-  runner = object.__new__(ExGRMTOnPolicyRunner)
+  runner = object.__new__(GMTrackOnPolicyRunner)
   runner.env = Wrapper()  # type: ignore[assignment]
   runner._install_tracking_failure_step_hook()
   *_, returned = runner.env.step(torch.zeros(2, 1))
@@ -175,15 +175,15 @@ def test_runner_load_can_skip_training_environment_state(
   saved = {"version": 2, "samplers": {}}
 
   def fake_load(_runner, _path, _load_cfg, _strict, _map_location):
-    return {"ex_grmt_env_state": saved}
+    return {"gmtrack_env_state": saved}
 
   monkeypatch.setattr(MjlabOnPolicyRunner, "load", fake_load)
-  runner = object.__new__(ExGRMTOnPolicyRunner)
+  runner = object.__new__(GMTrackOnPolicyRunner)
   runner.cfg = {}
   restored = []
   runner._restore_env_state = restored.append  # type: ignore[method-assign]
 
   infos = runner.load("model.pt", restore_env_state=restore_env_state)
 
-  assert infos == {"ex_grmt_env_state": saved}
+  assert infos == {"gmtrack_env_state": saved}
   assert restored == [saved] * expected_restores

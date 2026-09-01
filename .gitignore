@@ -47,6 +47,16 @@ scripts/slurm/*
 !scripts/slurm/train_stage2_dong29999_probe.sbatch
 !scripts/slurm/evaluate_dong29999_probe.sbatch
 !scripts/slurm/train_stage1_causal.sbatch
+!scripts/slurm/train_stage1_causal_nomask.sbatch
+!scripts/slurm/train_stage1_causal_heading.sbatch
+!scripts/slurm/train_stage1_causal_intent_actor.sbatch
+
+# Agent instructions and the cluster job ledger -- local working files. The ledger
+# records real Slurm job IDs, cluster paths and account names; none of that belongs in
+# a published repository.
+/CLAUDE.md
+/AGENTS.md
+/SLURM_JOBS.md
 
 # Local paper PDFs -- kept out of the repository; download them from arXiv.
 2601.23080v1.pdf

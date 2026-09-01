@@ -5,7 +5,7 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-from ex_grmt.motion_grounding import (
+from gmtrack.motion_grounding import (
   G1_FK_BODY_ORDER,
   G1_JOINT_ORDER,
   CorrectionSmoothing,

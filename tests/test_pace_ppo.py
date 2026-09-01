@@ -9,12 +9,12 @@ import torch
 from rsl_rl.algorithms import PPO
 from tensordict import TensorDict
 
-from ex_grmt.provenance import (
+from gmtrack.provenance import (
   CHECKPOINT_OBSERVATION_SCHEMA_KEY,
   build_observation_schema,
 )
-from ex_grmt.rsl_rl.ppo_pace import PacePPO
-from ex_grmt.rsl_rl.storage import TRACKING_FAILURES_EXTRA, StarBatch
+from gmtrack.rsl_rl.ppo_pace import PacePPO
+from gmtrack.rsl_rl.storage import TRACKING_FAILURES_EXTRA, StarBatch
 
 TEST_OBSERVATION_SCHEMA = build_observation_schema(
   actor_observation_groups=["x"],

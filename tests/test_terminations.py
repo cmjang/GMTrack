@@ -1,10 +1,10 @@
-"""Tests for Ex-GRMT-specific episode boundaries."""
+"""Tests for GMTrack-specific episode boundaries."""
 
 from types import SimpleNamespace
 
 import torch
 
-from ex_grmt.mdp.terminations import motion_sequence_end, nonfinite_physics_state
+from gmtrack.mdp.terminations import motion_sequence_end, nonfinite_physics_state
 
 
 def test_motion_sequence_end_uses_each_environments_selected_sequence_length():

@@ -6,15 +6,15 @@ import pytest
 import torch
 from tensordict import TensorDict
 
-from ex_grmt.rl_cfgs import stage1_runner_cfg, stage2_runner_cfg
-from ex_grmt.rsl_rl.config import ExGRMTActorCfg
-from ex_grmt.rsl_rl.models import (
+from gmtrack.rl_cfgs import stage1_runner_cfg, stage2_runner_cfg
+from gmtrack.rsl_rl.config import GMTrackActorCfg
+from gmtrack.rsl_rl.models import (
   ACTION_HIST,
   COMMAND_WINDOW,
   PROPRIO_HIST,
-  ExGRMTActor,
+  GMTrackActor,
 )
-from ex_grmt.rsl_rl.runner import _command_token_layout
+from gmtrack.rsl_rl.runner import _command_token_layout
 
 HISTORY_LENGTH = 10
 PROPRIO_TERM_DIMS = (3, 3, 29, 29)
@@ -34,9 +34,9 @@ def _obs(command_token_dim: int) -> TensorDict:
   )
 
 
-def _actor(command_token_dim: int, obs_token_dim: int | None = None) -> ExGRMTActor:
+def _actor(command_token_dim: int, obs_token_dim: int | None = None) -> GMTrackActor:
   obs = _obs(command_token_dim if obs_token_dim is None else obs_token_dim)
-  return ExGRMTActor(
+  return GMTrackActor(
     obs=obs,
     obs_groups={
       "actor": [PROPRIO_HIST, ACTION_HIST, COMMAND_WINDOW],
@@ -58,11 +58,11 @@ def _actor(command_token_dim: int, obs_token_dim: int | None = None) -> ExGRMTAc
 
 
 def test_default_actor_config_and_stage_factories_remain_38d():
-  assert ExGRMTActorCfg().command_token_dim == 38
+  assert GMTrackActorCfg().command_token_dim == 38
   assert stage1_runner_cfg().actor.command_token_dim == 38
-  assert stage1_runner_cfg().experiment_name == "ex_grmt_stage1"
+  assert stage1_runner_cfg().experiment_name == "gmtrack_stage1"
   assert stage2_runner_cfg().actor.command_token_dim == 38
-  assert stage2_runner_cfg().experiment_name == "ex_grmt_stage2"
+  assert stage2_runner_cfg().experiment_name == "gmtrack_stage2"
 
 
 def test_heading_factories_use_44d_and_unique_default_names():
@@ -70,14 +70,23 @@ def test_heading_factories_use_44d_and_unique_default_names():
   stage2 = stage2_runner_cfg(heading_closed_loop=True)
 
   assert stage1.actor.command_token_dim == 44
-  assert stage1.experiment_name == "ex_grmt_stage1_heading"
+  assert stage1.experiment_name == "gmtrack_stage1_heading"
   assert stage2.actor.command_token_dim == 44
-  assert stage2.experiment_name == "ex_grmt_stage2_heading"
+  assert stage2.experiment_name == "gmtrack_stage2_heading"
 
   explicit = stage2_runner_cfg(
     heading_closed_loop=True, experiment_name="custom_heading_run"
   )
   assert explicit.experiment_name == "custom_heading_run"
+
+
+def test_causal_heading_factory_keeps_44d_heading_tokens():
+  cfg = stage1_runner_cfg(causal_online=True, heading_closed_loop=True)
+
+  assert cfg.actor.command_token_dim == 44
+  assert cfg.actor.use_command_valid_mask is True
+  assert cfg.actor.use_history_valid_mask is True
+  assert cfg.experiment_name == "gmtrack_stage1_causal_heading"
 
 
 @pytest.mark.parametrize("command_token_dim", [38, 44])

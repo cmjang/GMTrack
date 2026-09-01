@@ -7,7 +7,7 @@ from types import SimpleNamespace
 import pytest
 import torch
 
-from ex_grmt.scripts.rollout_eval import (
+from gmtrack.scripts.rollout_eval import (
   _cartesian_error_metrics,
   _transition_horizons,
   rollout_clips,

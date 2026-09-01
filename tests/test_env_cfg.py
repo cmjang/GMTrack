@@ -13,7 +13,7 @@ from types import SimpleNamespace
 import pytest
 import torch
 
-from ex_grmt import (
+from gmtrack import (
   MANIFEST_CHALLENGING,
   MANIFEST_MASTERED,
   MANIFEST_STAGE1,
@@ -23,17 +23,17 @@ from ex_grmt import (
   _stage1_env,
   _stage2_env,
 )
-from ex_grmt.envs.env_cfg import (
+from gmtrack.envs.env_cfg import (
   COMMAND_WINDOW_NOISE,
   COMMAND_WINDOW_RADIUS,
   DEFAULT_SIM_HZ,
   HISTORY_LENGTH,
   POLICY_HZ,
 )
-from ex_grmt.mdp import events as ex_events
-from ex_grmt.mdp.events import _acquisition_env_ids
-from ex_grmt.mdp.observations import _add_acquisition_uniform_noise
-from ex_grmt.rl_cfgs import (
+from gmtrack.mdp import events as ex_events
+from gmtrack.mdp.events import _acquisition_env_ids
+from gmtrack.mdp.observations import _add_acquisition_uniform_noise
+from gmtrack.rl_cfgs import (
   ACQUISITION_FRACTION,
   BETA,
   KAPPA,
@@ -44,7 +44,7 @@ from ex_grmt.rl_cfgs import (
   stage1_runner_cfg,
   stage2_runner_cfg,
 )
-from ex_grmt.rsl_rl.config import ExGRMTActorCfg
+from gmtrack.rsl_rl.config import GMTrackActorCfg
 
 TOKEN_DIM = 38  # 3 + 3 + 3 + 29 (Eq. 2)
 NUM_TOKENS = 21  # 2L + 1, L = 10
@@ -86,7 +86,7 @@ def test_nonfinite_physics_state_is_a_terminal_failure():
 
 
 def test_actor_dims_match_table_iii():
-  cfg = ExGRMTActorCfg()
+  cfg = GMTrackActorCfg()
   assert cfg.hidden_dims == (1024, 1024, 512, 256)
   assert cfg.token_dim == 64
   assert cfg.history_length == HISTORY_LENGTH == 10
@@ -140,10 +140,10 @@ def test_strict_v1_tasks_disable_recovery_proxy():
     assert motion.recovery_probability == 0.0
     assert "recovery_assist" not in cfg.events
 
-  from ex_grmt.envs.env_cfg import RECOVERY_PROBABILITY, make_ex_grmt_env_cfg
+  from gmtrack.envs.env_cfg import RECOVERY_PROBABILITY, make_gmtrack_env_cfg
 
   stage2 = _stage2_env()
-  proxy = make_ex_grmt_env_cfg(
+  proxy = make_gmtrack_env_cfg(
     manifest=MANIFEST_STRATIFIED,
     acquisition_clips=stage2.commands["motion"].acquisition_clips,
     consolidation_clips=stage2.commands["motion"].consolidation_clips,

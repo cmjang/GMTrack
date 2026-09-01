@@ -7,13 +7,13 @@ import math
 import torch
 from mjlab.utils.lab_api.math import quat_from_euler_xyz
 
-from ex_grmt.envs.env_cfg import (
+from gmtrack.envs.env_cfg import (
   COMMAND_WINDOW_NOISE,
   COMMAND_WINDOW_RADIUS,
   command_window_noise,
-  make_ex_grmt_env_cfg,
+  make_gmtrack_env_cfg,
 )
-from ex_grmt.mdp.commands import relative_root_orientation_6d
+from gmtrack.mdp.commands import relative_root_orientation_6d
 
 
 def _yaw_quat(angle: torch.Tensor) -> torch.Tensor:
@@ -67,7 +67,7 @@ def test_heading_noise_appends_six_channels_per_token_without_changing_baseline(
 
 
 def test_heading_cfg_adds_only_training_yaw_jitter_and_play_is_clean():
-  baseline = make_ex_grmt_env_cfg(manifest="unused.json")
+  baseline = make_gmtrack_env_cfg(manifest="unused.json")
   assert baseline.commands["motion"].heading_closed_loop is False
   assert baseline.commands["motion"].pose_range == {}
   assert (
@@ -75,7 +75,7 @@ def test_heading_cfg_adds_only_training_yaw_jitter_and_play_is_clean():
     == 21 * 38
   )
 
-  heading = make_ex_grmt_env_cfg(manifest="unused.json", heading_closed_loop=True)
+  heading = make_gmtrack_env_cfg(manifest="unused.json", heading_closed_loop=True)
   assert heading.commands["motion"].heading_closed_loop is True
   assert heading.commands["motion"].pose_range == {"yaw": (-0.2, 0.2)}
   assert (
@@ -83,7 +83,7 @@ def test_heading_cfg_adds_only_training_yaw_jitter_and_play_is_clean():
     == 21 * 44
   )
 
-  play = make_ex_grmt_env_cfg(
+  play = make_gmtrack_env_cfg(
     manifest="unused.json", heading_closed_loop=True, play=True
   )
   assert play.commands["motion"].heading_closed_loop is True

@@ -12,8 +12,8 @@ import tyro
 from mjlab.scripts.csv_to_npz import MotionLoader
 from mjlab.utils.lab_api.math import quat_slerp
 
-from ex_grmt.motion_grounding import GroundClearanceReport, GroundingResult
-from ex_grmt.scripts.prepare_motions import (
+from gmtrack.motion_grounding import GroundClearanceReport, GroundingResult
+from gmtrack.scripts.prepare_motions import (
   MOTIONDECODE_HEADER,
   Config,
   _apply_ground_alignment,
@@ -413,7 +413,7 @@ def test_resume_rejects_changed_conversion_fingerprint(tmp_path):
 
 
 def test_bones_seed_rejects_non_120_fps(tmp_path):
-  from ex_grmt.scripts.prepare_motions import main
+  from gmtrack.scripts.prepare_motions import main
 
   with pytest.raises(ValueError, match="input-fps 120"):
     main(
@@ -427,7 +427,7 @@ def test_bones_seed_rejects_non_120_fps(tmp_path):
 
 
 def test_motiondecode_rejects_non_120_fps(tmp_path):
-  from ex_grmt.scripts.prepare_motions import main
+  from gmtrack.scripts.prepare_motions import main
 
   with pytest.raises(ValueError, match="MotionDecode.*input-fps 120"):
     main(

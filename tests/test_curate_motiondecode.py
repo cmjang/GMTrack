@@ -6,8 +6,8 @@ from pathlib import Path
 
 import numpy as np
 
-import ex_grmt.scripts.curate_motiondecode as curate
-from ex_grmt.scripts.curate_motiondecode import (
+import gmtrack.scripts.curate_motiondecode as curate
+from gmtrack.scripts.curate_motiondecode import (
   BasicGroup,
   _backflip_candidate,
   _kinematic_metrics,
@@ -15,7 +15,7 @@ from ex_grmt.scripts.curate_motiondecode import (
   build_basic_backflip_selection,
   build_selection,
 )
-from ex_grmt.scripts.prepare_motions import MOTIONDECODE_HEADER
+from gmtrack.scripts.prepare_motions import MOTIONDECODE_HEADER
 
 
 def _csv(root: Path, relative: str, *, valid: bool = True) -> Path:

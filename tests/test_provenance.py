@@ -7,8 +7,8 @@ from types import SimpleNamespace
 
 import pytest
 
-import ex_grmt.provenance as provenance_module
-from ex_grmt.provenance import (
+import gmtrack.provenance as provenance_module
+from gmtrack.provenance import (
   CHECKPOINT_OBSERVATION_SCHEMA_KEY,
   DATA_PROTOCOL,
   DISTILLATION_ACTION_SPACE,
@@ -22,9 +22,7 @@ from ex_grmt.provenance import (
 )
 
 
-def _observation_schema(
-  offsets: list[int], *, use_past_valid_mask: bool
-) -> dict:
+def _observation_schema(offsets: list[int], *, use_past_valid_mask: bool) -> dict:
   actor_groups = ["proprio_hist", "action_hist", "command_window"]
   widths = {
     "proprio_hist": 640,
@@ -115,22 +113,14 @@ def test_run_provenance_hashes_every_training_input(tmp_path: Path):
 
 
 def test_observation_schema_distinguishes_same_shape_temporal_layouts():
-  baseline = _observation_schema(
-    list(range(-10, 11)), use_past_valid_mask=False
-  )
-  causal = _observation_schema(
-    list(range(-20, 1)), use_past_valid_mask=True
-  )
+  baseline = _observation_schema(list(range(-10, 11)), use_past_valid_mask=False)
+  causal = _observation_schema(list(range(-20, 1)), use_past_valid_mask=True)
   assert baseline["sha256"] != causal["sha256"]
 
   checkpoint = {CHECKPOINT_OBSERVATION_SCHEMA_KEY: causal}
-  validate_checkpoint_observation_schema(
-    checkpoint, causal, require_present=True
-  )
+  validate_checkpoint_observation_schema(checkpoint, causal, require_present=True)
   with pytest.raises(ValueError, match="does not match"):
-    validate_checkpoint_observation_schema(
-      checkpoint, baseline, require_present=False
-    )
+    validate_checkpoint_observation_schema(checkpoint, baseline, require_present=False)
 
 
 def test_causal_schema_fingerprints_critic_history_masks_and_auxiliary_layout():
@@ -195,9 +185,7 @@ def test_causal_schema_fingerprints_critic_history_masks_and_auxiliary_layout():
   payload = schema["schema"]
   assert payload["command"]["window_offsets"] == actor_offsets
   assert payload["command"]["critic_window_offsets"] == critic_offsets
-  assert payload["command"]["reconstruction_window_offsets"] == (
-    reconstruction_offsets
-  )
+  assert payload["command"]["reconstruction_window_offsets"] == (reconstruction_offsets)
   assert payload["command"]["position_encoding"] == (
     "sinusoidal_normalized_actual_offset"
   )
@@ -207,23 +195,69 @@ def test_causal_schema_fingerprints_critic_history_masks_and_auxiliary_layout():
   assert schema["sha256"] != build([1, 2, 4, 8, 16, 32, 63])["sha256"]
 
 
-def test_causal_schema_rejects_legacy_checkpoint_without_fingerprint():
-  causal = _observation_schema(
-    list(range(-20, 1)), use_past_valid_mask=True
+def test_observation_schema_fingerprints_intent_actor_conditioning():
+  base = _observation_schema([0], use_past_valid_mask=False)
+  conditioned = build_observation_schema(
+    actor_observation_groups=["proprio_hist", "action_hist", "command_window"],
+    critic_observation_groups=["critic"],
+    observation_group_widths={
+      "proprio_hist": 640,
+      "action_hist": 290,
+      "command_window": 38,
+      "critic": 261,
+      "future_reconstruction_target": 114,
+      "future_reconstruction_valid_mask": 3,
+    },
+    command_window_offsets=[0],
+    critic_window_offsets=[],
+    reconstruction_window_offsets=[5, 10, 20],
+    command_fps=50.0,
+    command_token_dim=38,
+    heading_closed_loop=False,
+    history_length=10,
+    proprio_term_names=["projected_gravity", "base_ang_vel", "joint_pos", "joint_vel"],
+    proprio_term_dims=[3, 3, 29, 29],
+    action_dim=29,
+    use_past_valid_mask=False,
+    use_history_valid_mask=False,
+    use_future_valid_mask=False,
+    use_reconstruction_valid_mask=True,
+    command_position_encoding="sinusoidal_normalized_actual_offset",
+    use_intent_aux=True,
+    intent_latent_dim=64,
+    use_intent_in_actor=True,
   )
+
+  payload = conditioned["schema"]["intent_auxiliary"]
+  assert payload["actor_conditioning"] == "deterministic_posterior_mean"
+  assert "posterior_mean_exported" in payload["deployment"]
+  assert conditioned["sha256"] != base["sha256"]
+
+
+def test_causal_schema_rejects_legacy_checkpoint_without_fingerprint():
+  causal = _observation_schema(list(range(-20, 1)), use_past_valid_mask=True)
   with pytest.raises(ValueError, match="no observation-schema fingerprint"):
     validate_checkpoint_observation_schema({}, causal, require_present=True)
 
-  baseline = _observation_schema(
-    list(range(-10, 11)), use_past_valid_mask=False
-  )
+  baseline = _observation_schema(list(range(-10, 11)), use_past_valid_mask=False)
   validate_checkpoint_observation_schema({}, baseline, require_present=False)
 
 
+def test_pre_rename_checkpoints_are_validated_under_the_old_project_key():
+  """Renaming Ex-GRMT to GMTrack must not turn a fingerprint into "no fingerprint"."""
+  causal = _observation_schema(list(range(-20, 1)), use_past_valid_mask=True)
+  baseline = _observation_schema(list(range(-10, 11)), use_past_valid_mask=False)
+  legacy = {"ex_grmt_observation_schema": causal}
+
+  validate_checkpoint_observation_schema(legacy, causal, require_present=True)
+  # The dangerous case: a legacy-ABI task would silently skip the comparison if the
+  # renamed key were treated as absent.
+  with pytest.raises(ValueError, match="does not match"):
+    validate_checkpoint_observation_schema(legacy, baseline, require_present=False)
+
+
 def test_observation_schema_rejects_tampered_payload():
-  schema = _observation_schema(
-    list(range(-20, 1)), use_past_valid_mask=True
-  )
+  schema = _observation_schema(list(range(-20, 1)), use_past_valid_mask=True)
   schema["schema"]["command"]["window_offsets"][0] = -19
   with pytest.raises(ValueError, match="stored SHA256"):
     validate_checkpoint_observation_schema(

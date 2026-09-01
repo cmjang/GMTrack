@@ -5,7 +5,7 @@ from pathlib import Path
 import pytest
 from torch.utils.tensorboard import SummaryWriter
 
-from ex_grmt.scripts.check_stage2_gate import Config, check_gate
+from gmtrack.scripts.check_stage2_gate import Config, check_gate
 
 
 def _write_gate(path: Path, *, bad_floor_steps: int) -> None:
