@@ -8,12 +8,8 @@ Unofficial reproduction of highly dynamic humanoid whole-body motion tracking on
 Unitree G1 (29 DoF), written against two public references:
 
 - **Extreme-RGMT: Continual Learning of Highly Dynamic Skills for Robust Generalist
-  Humanoid Control** (arXiv:2607.20110) — the method: the two-stage pipeline, PACE,
-  STAR, the encoder architecture, the reward and randomization tables.
-- **SONIC** (and BeyondMimic / InstinctLab) — the implementation values the paper never
-  publishes: parallel environment count, iteration budget, simulation rate, adaptive
-  sampling constants, FSQ levels. Every such value is labelled in code with the release
-  it came from, so nothing borrowed is ever presented as a paper number.
+  Humanoid Control** (arXiv:2607.20110)
+- **SONIC** (and BeyondMimic / InstinctLab)
 
 > **GMTrack is not the official implementation.** It is an independent reimplementation
 > from the papers, not affiliated with or endorsed by any of the original authors, and it
