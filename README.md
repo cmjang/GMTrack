@@ -6,10 +6,8 @@ as an external task package for [mjlab](https://github.com/mujocolab/mjlab).
 [![Built on mjlab](https://img.shields.io/badge/built%20on-mjlab-4c1.svg)](https://github.com/mujocolab/mjlab)
 [![Python](https://img.shields.io/badge/python-3.10%E2%80%933.13-blue.svg)](https://www.python.org/)
 
-GMTrack takes the two-stage continual-learning recipe of Extreme-RGMT — PACE and STAR —
-and builds it on the mjlab/BeyondMimic tracking stack, filling in what the papers leave
-unspecified from the public SONIC and InstinctLab releases. It is not affiliated with or
-endorsed by any of them.
+Two-stage continual learning (PACE + STAR) on top of the mjlab/BeyondMimic tracking
+stack, referencing Extreme-RGMT, SONIC and InstinctLab.
 
 mjlab already ships a BeyondMimic reimplementation under `mjlab/tasks/tracking/`, so
 GMTrack plugs into mjlab instead of forking it: tasks register through mjlab's
@@ -284,17 +282,13 @@ Conventions:
 
 ## References
 
-Built on [mjlab](https://github.com/mujocolab/mjlab) and
-[rsl-rl](https://github.com/leggedrobotics/rsl_rl), drawing on:
-
 - *Extreme-RGMT: Continual Learning of Highly Dynamic Skills for Robust Generalist
   Humanoid Control* — [arXiv:2607.20110](https://arxiv.org/abs/2607.20110) — and its
   predecessor *RGMT* — [arXiv:2601.23080](https://arxiv.org/abs/2601.23080).
 - [InstinctLab](https://github.com/project-instinct/InstinctLab) and
-  [SONIC](https://github.com/NVlabs/GR00T-WholeBodyControl), for values the papers leave
-  unspecified.
-
-Cite the papers rather than this repository.
+  [SONIC](https://github.com/NVlabs/GR00T-WholeBodyControl).
+- [mjlab](https://github.com/mujocolab/mjlab) and
+  [rsl-rl](https://github.com/leggedrobotics/rsl_rl), which this package builds on.
 
 ## License
 
