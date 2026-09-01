@@ -1,6 +1,5 @@
 # GMTrack
 
-[![Paper](https://img.shields.io/badge/arXiv-2607.20110-b31b1b.svg)](https://arxiv.org/abs/2607.20110)
 [![Built on mjlab](https://img.shields.io/badge/built%20on-mjlab-4c1.svg)](https://github.com/mujocolab/mjlab)
 [![Python](https://img.shields.io/badge/python-3.10%E2%80%933.13-blue.svg)](https://www.python.org/)
 
