@@ -21,9 +21,13 @@ cankao/
 data/
 output/
 
-# Local agent state.
+# Local agent state and locally installed CLI tooling.
 /CLAUDE.md
 /AGENTS.md
+/.omo/
+/node_modules/
+/package.json
+/package-lock.json
 
 # Local paper PDFs -- kept out of the repository; download them from arXiv.
 2601.23080v1.pdf
