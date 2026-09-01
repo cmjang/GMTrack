@@ -182,31 +182,15 @@ rather than hard-coding a cluster layout.
 
 | Task ID | Role |
 |---|---|
-| `GMTrack-Stage1-Flat-Unitree-G1` | Stage I generalist base policy |
-| `GMTrack-Stage1-Causal-Flat-Unitree-G1` | Zero-lookahead Stage I; Heading is built in by default (44D tokens, yaw reset), with pelvis-realigned foot XY/Z terminations (0.20/0.15 m) |
-| `GMTrack-Stage1-Causal-Recovery-Flat-Unitree-G1` | Default causal task plus 15% RGMT fall-recovery resets/assist/shield; Heading remains built in |
-| `GMTrack-Stage2-Flat-Unitree-G1` | Stage II with PACE + STAR (the method) |
-| `GMTrack-Stage1-Heading-Flat-Unitree-G1` | Stage I with closed-loop root heading (44D tokens) |
-| `GMTrack-Stage2-Heading-Flat-Unitree-G1` | Stage II counterpart of the heading family |
-| `GMTrack-Stage1-Recovery-Flat-Unitree-G1` | Stage I plus the RGMT fall-recovery protocol |
-| `GMTrack-Stage1-Heading-Recovery-Flat-Unitree-G1` | Both of the above |
-| `GMTrack-Stage2-NoStar-Flat-Unitree-G1` | Ablation: no STAR (Fig. 7–8, Table VII) |
-| `GMTrack-Stage2-NoCon-Flat-Unitree-G1` | Ablation: no consolidation loss (Fig. 9) |
-| `GMTrack-Stage2-FixedLambda-Flat-Unitree-G1` | Ablation: `λ_con ≡ 0.5` (Fig. 9) |
-| `GMTrack-Stage2-UnifiedEnc-Flat-Unitree-G1` | Ablation: unified encoder (Table VIII) |
-| `GMTrack-Stage2-NoFSQ-Flat-Unitree-G1` | Ablation: no FSQ bottleneck (Table VIII) |
-| `GMTrack-Finetune-Flat-Unitree-G1` | Baseline: fine-tune on `D_c` only |
-| `GMTrack-MixedTraining-Flat-Unitree-G1` | Baseline: one undifferentiated pool, no roles |
+| `GMTrack-Stage1-Flat-Unitree-G1` | Original Stage I |
+| `GMTrack-Stage2-Flat-Unitree-G1` | Original Stage II |
+| `GMTrack-Stage1-Heading-Flat-Unitree-G1` | Original Stage I with heading feedback |
+| `GMTrack-Stage2-Heading-Flat-Unitree-G1` | Original Stage II with heading feedback |
+| `GMTrack-Stage1-Causal-Flat-Unitree-G1` | Past-only Stage I without heading feedback |
+| `GMTrack-Stage1-Causal-Heading-Flat-Unitree-G1` | Past-only Stage I with heading feedback |
 
-The heading family appends the 6D robot-to-reference pelvis orientation error to every
-command token. Causal task names always include this feedback and use 44D tokens; no
-separate `Causal-Heading` aliases are registered. Historical 38D causal checkpoints
-are retained only for audit and are incompatible with the current causal task names.
-
-The explicit-intent causal family keeps the same past-only external inputs, but appends
-the deterministic mean of its history-conditioned intent distribution to the actor
-trunk. The stochastic sample, future decoder, and future targets remain training-only.
-Its enlarged actor trunk is checkpoint-incompatible with the ordinary causal family.
+`Causal` tasks use only current and past command tokens. `Heading` appends the 6D
+robot-to-reference pelvis orientation error to each command token.
 
 ## Motion data
 
@@ -260,43 +244,6 @@ Succ. / `E_MPJPE`:
 
 The specialist gap is the entire point of Stage II.
 
-## Deviations and assumptions
-
-Everything the paper specifies is followed as written. Where it is silent, the value
-comes from the reference implementations on this line of work and is marked as such —
-never presented as a paper value.
-
-| Item | Value used | Source |
-|---|---|---|
-| Parallel environments | 4096 (4 GPUs × 1024) | BeyondMimic / SONIC convention |
-| Iterations | 100k (Stage I), 50k (Stage II) | SONIC-scale budget |
-| Simulation / policy rate | 200 Hz / 50 Hz, decimation 4 | BeyondMimic / SONIC |
-| Adaptive sampling | bin 1 s, α = 0.001, ε_u = 0.1, `c_max = mean × 200` | BeyondMimic + SONIC |
-| FSQ levels | 32 per dimension | SONIC's matching 2 × 32 tokenizer |
-| Attention block internals | 4 heads, pre-LN residual blocks, sinusoidal PE | RGMT (arXiv:2601.23080), Eq. 9–11/14–15 |
-| Fall recovery | RGMT Sec. II-D protocol, off by default | [`docs/recovery_proxy.md`](docs/recovery_proxy.md) |
-| Ground alignment | ≥ 3 mm clearance, 0.3 s smoothing | local data cleaning |
-| Closed-loop heading | opt-in `-Heading-` task family | local extension |
-
-A few design constraints are easy to break by accident and are worth knowing before
-editing:
-
-- **No running-statistic observation normalization** on the policy (Sec. IV-A); the
-  three branches each use LayerNorm. The critic keeps its own normalizer.
-- **Actions are residuals on the reference joint pose** `q_tar = q_ref + a_t` (Eq. 3),
-  not on a constant standing pose.
-- **The critic sees a single current reference token**, not the 21-token command
-  window — feeding the window changes value estimates, GAE, and STAR statistics.
-- **Domain randomization scope**: all environments in Stage I, but only the
-  acquisition group in Stage II (Sec. IV-B2).
-- **Role assignment has exactly one authority**, `pace.py::pace_env_split`; if the
-  environment side and the storage side ever disagree, the run silently degrades into
-  the Mixed Training ablation.
-
-Every paper constant is tagged in code with the table or equation it comes from, and
-every place the paper is underspecified carries a comment naming the source of the
-value used instead (BeyondMimic, SONIC, RGMT, or a local choice).
-
 ## Development
 
 ```bash
@@ -322,28 +269,6 @@ class of bug that is hardest to find here, a plausible but wrong reference frame
 | `src/gmtrack/rsl_rl/storage.py` | STAR normalization and fragment resampling |
 | `src/gmtrack/motion_grounding.py` | collision-geometry ground alignment |
 | `src/gmtrack/scripts/` | data preparation, stratification, evaluation, viewers |
-
-## Citation
-
-If you use this code, please cite the original paper (Ma et al., 2026; [project
-page](https://zeonsunlightyu.github.io/Extreme-RGMT.github.io/)):
-
-```bibtex
-@article{ma2026extremergmt,
-  title   = {Extreme-RGMT: Continual Learning of Highly Dynamic Skills for
-             Robust Generalist Humanoid Control},
-  author  = {Ma, Yubiao and Yu, Han and Guo, Kai and Lv, Changtai and
-             Mao, Zhengquan and Xing, Boyang and Ren, Xuemei and Zheng, Dongdong},
-  journal = {arXiv preprint arXiv:2607.20110},
-  year    = {2026}
-}
-```
-
-This repository reproduces revision **v1** specifically (the PDF is not
-redistributed here; SHA256
-`55cca5c02f16c659e4ab3baf08d9ad1fb69865f37cfba084958ade0911cf51fe`). Details the
-paper omits are taken from its predecessor RGMT (arXiv:2601.23080) and are labelled
-as such throughout.
 
 ## Acknowledgements
 

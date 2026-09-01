@@ -111,9 +111,9 @@ def test_random_recovery_rollout_is_unassisted_and_nominal():
         assert term.params["enabled"] is False
 
 
-def test_random_recovery_rollout_requires_recovery_task():
+def test_random_recovery_rollout_requires_recovery_config():
   cfg = make_gmtrack_env_cfg(manifest="unused.json")
-  with pytest.raises(ValueError, match="requires a task constructed with recovery"):
+  with pytest.raises(ValueError, match="requires an environment config constructed"):
     _configure_random_recovery_rollout(cfg, nominal=True)
 
 

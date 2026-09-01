@@ -1,5 +1,5 @@
 #!/bin/bash
-# Stage-I for the default online-causal task: zero future frames plus Heading.
+# Stage I with zero future frames and no heading feedback.
 #
 # This is NOT a reproduction of 2607.20110v1 and its numbers must not be compared
 # against Table VI. The paper's actor consumes g_{t-L:t+L} (21 tokens, 200 ms of
@@ -7,15 +7,14 @@
 # survives only in the training-time privileged critic and the intent reconstruction
 # target, both discarded at deployment, so the exported policy runs with no lookahead
 # and no buffering latency.
-# Every 38D reference token is extended by the 6D robot-to-reference root-orientation
-# error. Feet terminate at 0.20 m pelvis-XY/yaw-realigned horizontal error or 0.15 m Z.
+# Feet terminate at 0.20 m pelvis-XY/yaw-realigned horizontal error or 0.15 m Z.
 #
 # Component provenance: causal actor (Humanoid-GPT arXiv:2606.03985, EGM
 # arXiv:2512.19043); intent bottleneck + future reconstruction (TeleGate
 # arXiv:2602.09628, DAJI arXiv:2605.14417, GigaBrain-WBC-0.5 arXiv:2608.18234);
 # V(h, s, g_future) critic (Baisero & Amato arXiv:2105.11674, Informed Asymmetric
 # Actor-Critic arXiv:2509.26000).
-#SBATCH --job-name=gmtrack-csl-hdg-s1
+#SBATCH --job-name=gmtrack-csl-s1
 #SBATCH --output=logs/slurm/%x-%j.out
 #SBATCH --error=logs/slurm/%x-%j.err
 #SBATCH --nodes=1
@@ -50,10 +49,10 @@ SEED="${SEED:-42}"
 ENVS_PER_GPU="${ENVS_PER_GPU:-1024}"
 MAX_ITERS="${MAX_ITERS:-100000}"
 NUM_GPUS=4
-RUN_NAME="${RUN_NAME:-causal-heading-seed${SEED}}"
+RUN_NAME="${RUN_NAME:-causal-seed${SEED}}"
 DATA_DIR="${GMTRACK_DATA:-$PROJECT_DIR/data}"
 MANIFEST="${GMTRACK_STAGE1_MANIFEST:-$DATA_DIR/current/stage1_paper_mix_final_backflip_cartwheel_balanced_grounded_no_fall_getup.json}"
-PIPELINE_DIR="$PROJECT_DIR/logs/pipeline/causal-heading-seed${SEED}"
+PIPELINE_DIR="$PROJECT_DIR/logs/pipeline/causal-seed${SEED}"
 
 # The auxiliary weights start at TeleGate's published values. They are the knob most
 # likely to need tuning: that paper's feature scales and reduction differ from ours,
@@ -73,8 +72,8 @@ export OMP_NUM_THREADS="${OMP_NUM_THREADS:-2}"
 export PYTHONUNBUFFERED=1
 export NCCL_DEBUG="${NCCL_DEBUG:-WARN}"
 
-echo "causal Heading Stage I: seed=$SEED total_envs=$((ENVS_PER_GPU * NUM_GPUS)) iterations=$MAX_ITERS"
-echo "  actor future frames: none | heading feedback: 6D | reset yaw: +/-0.2 rad"
+echo "causal Stage I: seed=$SEED total_envs=$((ENVS_PER_GPU * NUM_GPUS)) iterations=$MAX_ITERS"
+echo "  actor future frames: none | heading feedback: none"
 echo "  foot termination: pelvis-realigned XY=0.20 m | Z=0.15 m"
 echo "  intent aux: recon=$RECON_COEF kl=$KL_COEF"
 nvidia-smi --query-gpu=index,name,memory.total --format=csv
@@ -99,10 +98,10 @@ ARGS=(
 
 /opt/gridview/slurm/bin/srun train "${ARGS[@]}"
 
-RUN_DIR="$(find logs/rsl_rl/gmtrack_stage1_causal_heading -mindepth 1 -maxdepth 1 -type d -name "*_${RUN_NAME}" -printf '%T@ %p\n' | sort -n | tail -1 | cut -d' ' -f2-)"
+RUN_DIR="$(find logs/rsl_rl/gmtrack_stage1_causal -mindepth 1 -maxdepth 1 -type d -name "*_${RUN_NAME}" -printf '%T@ %p\n' | sort -n | tail -1 | cut -d' ' -f2-)"
 CHECKPOINT="$RUN_DIR/model_$((MAX_ITERS - 1)).pt"
 test -f "$CHECKPOINT"
 realpath "$CHECKPOINT" > "$PIPELINE_DIR/base_checkpoint.txt"
-echo "causal Heading Stage-I handoff: $CHECKPOINT"
+echo "causal Stage-I handoff: $CHECKPOINT"
 echo "Next: re-stratify with THIS checkpoint (the old stratified.json is invalid for"
 echo "      a causal policy), then submit the causal Stage II."

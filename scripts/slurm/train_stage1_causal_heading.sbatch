@@ -65,7 +65,7 @@ echo "  intent aux: recon=$RECON_COEF kl=$KL_COEF"
 nvidia-smi --query-gpu=index,name,memory.total --format=csv
 
 ARGS=(
-  GMTrack-Stage1-Causal-Flat-Unitree-G1
+  GMTrack-Stage1-Causal-Heading-Flat-Unitree-G1
   --env.scene.num-envs "$ENVS_PER_GPU"
   --env.seed "$SEED"
   --agent.seed "$SEED"

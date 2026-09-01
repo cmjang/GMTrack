@@ -1,5 +1,5 @@
 #!/bin/bash
-# Runs only after a failed primary gate. Arms isolate consolidation from step size.
+# Runs only after a failed primary gate. Arms compare two step sizes.
 #SBATCH --job-name=gmtrack-v1p-diag
 #SBATCH --output=logs/slurm/%x-%A_%a.out
 #SBATCH --error=logs/slurm/%x-%A_%a.err
@@ -12,7 +12,7 @@
 #SBATCH --cpus-per-task=16
 #SBATCH --mem=90G
 #SBATCH --time=12:00:00
-#SBATCH --array=0-2
+#SBATCH --array=0-1
 
 set -euo pipefail
 
@@ -37,8 +37,7 @@ export GMTRACK_CHALLENGING_MANIFEST="$(<"$PIPELINE_DIR/challenging_manifest.txt"
 
 case "$SLURM_ARRAY_TASK_ID" in
   0) TASK=GMTrack-Stage2-Flat-Unitree-G1; LR=1e-3; ARM=full-lr1e3 ;;
-  1) TASK=GMTrack-Stage2-NoCon-Flat-Unitree-G1; LR=1e-3; ARM=nocon-lr1e3 ;;
-  2) TASK=GMTrack-Stage2-Flat-Unitree-G1; LR=1e-4; ARM=full-lr1e4 ;;
+  1) TASK=GMTrack-Stage2-Flat-Unitree-G1; LR=1e-4; ARM=full-lr1e4 ;;
   *) echo "unexpected array arm $SLURM_ARRAY_TASK_ID" >&2; exit 2 ;;
 esac
 

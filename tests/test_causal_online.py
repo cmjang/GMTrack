@@ -40,30 +40,20 @@ from gmtrack.rl_cfgs import INTENT_KL_COEF, INTENT_RECONSTRUCTION_COEF
 
 BASE_STAGE1 = "GMTrack-Stage1-Flat-Unitree-G1"
 CAUSAL_STAGE1 = "GMTrack-Stage1-Causal-Flat-Unitree-G1"
-CAUSAL_RECOVERY_STAGE1 = "GMTrack-Stage1-Causal-Recovery-Flat-Unitree-G1"
-CAUSAL_NOMASK_STAGE1 = "GMTrack-Stage1-CausalNoMask-Flat-Unitree-G1"
+CAUSAL_HEADING_STAGE1 = "GMTrack-Stage1-Causal-Heading-Flat-Unitree-G1"
 CAUSAL_STAGE2 = "GMTrack-Stage2-Causal-Flat-Unitree-G1"
 TOKEN_DIM = 38
-REGISTERED_CAUSAL_TOKEN_DIM = 44
 CAUSAL_ACTOR_OFFSETS = (-32, -24, -16, -12, -8, -6, -4, -3, -2, -1, 0)
 CAUSAL_CRITIC_OFFSETS = (1, 2, 4, 8, 16, 32, 64)
 CAUSAL_RECONSTRUCTION_TARGETS = (5, 10, 20)
 
-LEGACY_TASKS = (
+NON_CAUSAL_TASKS = (
   "GMTrack-Stage1-Flat-Unitree-G1",
-  "GMTrack-Stage1-Recovery-Flat-Unitree-G1",
   "GMTrack-Stage1-Heading-Flat-Unitree-G1",
-  "GMTrack-Stage1-Heading-Recovery-Flat-Unitree-G1",
   "GMTrack-Stage2-Flat-Unitree-G1",
   "GMTrack-Stage2-Heading-Flat-Unitree-G1",
-  "GMTrack-Stage2-NoStar-Flat-Unitree-G1",
-  "GMTrack-Stage2-NoCon-Flat-Unitree-G1",
-  "GMTrack-Stage2-FixedLambda-Flat-Unitree-G1",
-  "GMTrack-Stage2-UnifiedEnc-Flat-Unitree-G1",
-  "GMTrack-Stage2-NoFSQ-Flat-Unitree-G1",
-  "GMTrack-Finetune-Flat-Unitree-G1",
-  "GMTrack-MixedTraining-Flat-Unitree-G1",
 )
+SUPPORTED_TASKS = {*NON_CAUSAL_TASKS, CAUSAL_STAGE1, CAUSAL_HEADING_STAGE1}
 
 
 def _command_cfg(**overrides) -> MultiMotionCommandCfg:
@@ -332,8 +322,8 @@ def test_existing_default_task_observation_dimensions_remain_unchanged():
   assert _critic_dim(TOKEN_DIM) == 261
 
 
-@pytest.mark.parametrize("task_id", LEGACY_TASKS)
-def test_every_registered_legacy_task_keeps_observation_contract(task_id):
+@pytest.mark.parametrize("task_id", NON_CAUSAL_TASKS)
+def test_every_registered_non_causal_task_keeps_observation_contract(task_id):
   env_cfg = load_env_cfg(task_id)
   rl_cfg = load_rl_cfg(task_id)
   heading = "Heading" in task_id
@@ -365,11 +355,11 @@ def test_every_registered_legacy_task_keeps_observation_contract(task_id):
 
 def test_causal_tasks_are_registered_with_asymmetric_critic_inputs():
   tasks = list_tasks()
+  assert {task for task in tasks if task.startswith("GMTrack-")} == SUPPORTED_TASKS
   assert BASE_STAGE1 in tasks
   assert CAUSAL_STAGE1 in tasks
+  assert CAUSAL_HEADING_STAGE1 in tasks
   assert CAUSAL_STAGE2 not in tasks
-  assert "GMTrack-Stage1-Causal-Heading-Flat-Unitree-G1" not in tasks
-  assert "GMTrack-Stage1-Causal-Heading-Recovery-Flat-Unitree-G1" not in tasks
 
   baseline_env = load_env_cfg(BASE_STAGE1)
   causal_env = load_env_cfg(CAUSAL_STAGE1)
@@ -379,10 +369,10 @@ def test_causal_tasks_are_registered_with_asymmetric_critic_inputs():
   assert baseline_env.commands["motion"].command_window_offsets is None
   assert causal_env.commands["motion"].command_window_offsets == CAUSAL_ACTOR_OFFSETS
   assert causal_env.commands["motion"].critic_window_offsets == CAUSAL_CRITIC_OFFSETS
-  assert causal_env.commands["motion"].heading_closed_loop is True
-  assert causal_env.commands["motion"].pose_range == {"yaw": (-0.2, 0.2)}
+  assert causal_env.commands["motion"].heading_closed_loop is False
+  assert causal_env.commands["motion"].pose_range == {}
   assert baseline_rl.actor.use_command_valid_mask is False
-  assert causal_rl.actor.command_token_dim == REGISTERED_CAUSAL_TOKEN_DIM
+  assert causal_rl.actor.command_token_dim == TOKEN_DIM
   assert baseline_rl.obs_groups["actor"] == (
     "proprio_hist",
     "action_hist",
@@ -408,7 +398,7 @@ def test_causal_tasks_are_registered_with_asymmetric_critic_inputs():
   causal_actor_dim = (
     640
     + 290
-    + len(CAUSAL_ACTOR_OFFSETS) * REGISTERED_CAUSAL_TOKEN_DIM
+    + len(CAUSAL_ACTOR_OFFSETS) * TOKEN_DIM
     + HISTORY_LENGTH
     + 11
   )
@@ -416,23 +406,27 @@ def test_causal_tasks_are_registered_with_asymmetric_critic_inputs():
     640
     + 290
     + HISTORY_LENGTH
-    + _critic_dim(REGISTERED_CAUSAL_TOKEN_DIM)
-    + len(CAUSAL_CRITIC_OFFSETS) * REGISTERED_CAUSAL_TOKEN_DIM
+    + _critic_dim(TOKEN_DIM)
+    + len(CAUSAL_CRITIC_OFFSETS) * TOKEN_DIM
     + len(CAUSAL_CRITIC_OFFSETS)
   )
-  assert causal_actor_dim == 1435
-  assert causal_critic_dim == 1522
-  assert causal_rl.experiment_name == "gmtrack_stage1_causal_heading"
+  assert causal_actor_dim == 1369
+  assert causal_critic_dim == 1474
+  assert causal_rl.experiment_name == "gmtrack_stage1_causal"
 
 
-def test_every_registered_causal_name_defaults_to_heading():
-  for task_id in (CAUSAL_STAGE1, CAUSAL_RECOVERY_STAGE1, CAUSAL_NOMASK_STAGE1):
-    env_cfg = load_env_cfg(task_id)
-    rl_cfg = load_rl_cfg(task_id)
+def test_causal_heading_is_an_explicit_variant():
+  plain_env = load_env_cfg(CAUSAL_STAGE1)
+  heading_env = load_env_cfg(CAUSAL_HEADING_STAGE1)
+  plain_rl = load_rl_cfg(CAUSAL_STAGE1)
+  heading_rl = load_rl_cfg(CAUSAL_HEADING_STAGE1)
 
-    assert env_cfg.commands["motion"].heading_closed_loop is True
-    assert env_cfg.commands["motion"].pose_range == {"yaw": (-0.2, 0.2)}
-    assert rl_cfg.actor.command_token_dim == REGISTERED_CAUSAL_TOKEN_DIM
+  assert plain_env.commands["motion"].heading_closed_loop is False
+  assert plain_env.commands["motion"].pose_range == {}
+  assert plain_rl.actor.command_token_dim == 38
+  assert heading_env.commands["motion"].heading_closed_loop is True
+  assert heading_env.commands["motion"].pose_range == {"yaw": (-0.2, 0.2)}
+  assert heading_rl.actor.command_token_dim == 44
 
 
 def test_registered_stage1_causal_adds_only_the_sonic_foot_terminations():
@@ -454,27 +448,7 @@ def test_registered_stage1_causal_adds_only_the_sonic_foot_terminations():
   assert foot_z.func is bad_motion_body_pos_z_only_outside_recovery
   assert foot_z.params["threshold"] == 0.15
 
-  # Causal Stage II stays unavailable until a matching causal + Heading split exists.
+  # Causal Stage II stays unavailable until matching causal splits exist.
   stage2 = load_env_cfg("GMTrack-Stage2-Flat-Unitree-G1")
   assert "foot_pos_xy" not in stage2.terminations
   assert "foot_pos_z" not in stage2.terminations
-
-
-def test_causal_recovery_task_constructs_the_full_recovery_protocol():
-  train = load_env_cfg(CAUSAL_RECOVERY_STAGE1)
-  play = load_env_cfg(CAUSAL_RECOVERY_STAGE1, play=True)
-  runner = load_rl_cfg(CAUSAL_RECOVERY_STAGE1)
-
-  assert CAUSAL_RECOVERY_STAGE1 in list_tasks()
-  assert train.commands["motion"].require_causal_window is True
-  assert train.commands["motion"].heading_closed_loop is True
-  assert train.commands["motion"].pose_range == {"yaw": (-0.2, 0.2)}
-  assert train.commands["motion"].recovery_probability == 0.15
-  assert "recovery_assist" in train.events
-  assert train.events["recovery_assist"].mode == "step"
-  assert {"foot_pos_xy", "foot_pos_z"} <= set(train.terminations)
-  assert play.commands["motion"].recovery_probability == 0.0
-  assert play.commands["motion"].pose_range == {}
-  assert "recovery_assist" in play.events
-  assert runner.actor.command_token_dim == REGISTERED_CAUSAL_TOKEN_DIM
-  assert runner.experiment_name == "gmtrack_stage1_causal_heading_recovery"

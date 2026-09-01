@@ -13,14 +13,8 @@ from pathlib import Path
 
 from mjlab.tasks.registry import register_mjlab_task
 
-from gmtrack.envs.env_cfg import RECOVERY_PROBABILITY, make_gmtrack_env_cfg
-from gmtrack.rl_cfgs import (
-  finetune_runner_cfg,
-  no_fsq_runner_cfg,
-  stage1_runner_cfg,
-  stage2_runner_cfg,
-  unified_encoder_runner_cfg,
-)
+from gmtrack.envs.env_cfg import make_gmtrack_env_cfg
+from gmtrack.rl_cfgs import stage1_runner_cfg, stage2_runner_cfg
 from gmtrack.rsl_rl.runner import GMTrackOnPolicyRunner
 
 
@@ -60,6 +54,7 @@ MANIFEST_CHALLENGING = _manifest_path(
   "GMTRACK_CHALLENGING_MANIFEST", f"{_STANDARD_SPLIT}/challenging.json"
 )
 
+
 _HEADING_SPLIT = "current/stage1-heading-99999-cartwheel20-formal-seed42"
 MANIFEST_HEADING_STRATIFIED = _manifest_path(
   "GMTRACK_STRATIFIED_MANIFEST", f"{_HEADING_SPLIT}/stratified.json"
@@ -76,8 +71,17 @@ def _stage1_env(play: bool = False):
   return make_gmtrack_env_cfg(manifest=MANIFEST_STAGE1, play=play)
 
 
+def _stage1_heading_env(play: bool = False):
+  """Stage I with closed-loop heading feedback and the original command window."""
+  return make_gmtrack_env_cfg(
+    manifest=MANIFEST_STAGE1,
+    play=play,
+    heading_closed_loop=True,
+  )
+
+
 def _stage1_causal_env(play: bool = False):
-  """Legacy 38D causal config retained for checkpoint audit; not registered."""
+  """Past-only Stage I without heading feedback."""
   return make_gmtrack_env_cfg(
     manifest=MANIFEST_STAGE1,
     play=play,
@@ -87,7 +91,7 @@ def _stage1_causal_env(play: bool = False):
 
 
 def _stage1_causal_heading_env(play: bool = False):
-  """Past-only Stage I with the existing SONIC-style heading feedback."""
+  """Past-only Stage I with closed-loop heading feedback."""
   return make_gmtrack_env_cfg(
     manifest=MANIFEST_STAGE1,
     play=play,
@@ -95,75 +99,6 @@ def _stage1_causal_heading_env(play: bool = False):
     heading_closed_loop=True,
     sonic_foot_terminations=True,
   )
-
-
-def _stage1_causal_recovery_env(play: bool = False):
-  """Legacy 38D causal recovery config retained for audit; not registered."""
-  cfg = make_gmtrack_env_cfg(
-    manifest=MANIFEST_STAGE1,
-    play=play,
-    causal_online=True,
-    sonic_foot_terminations=True,
-    recovery_probability=RECOVERY_PROBABILITY,
-  )
-  if play:
-    cfg.commands["motion"].recovery_probability = 0.0
-  return cfg
-
-
-def _stage1_causal_heading_recovery_env(play: bool = False):
-  """Causal + Heading + foot guards + RGMT Sec. II-D fall recovery."""
-  cfg = make_gmtrack_env_cfg(
-    manifest=MANIFEST_STAGE1,
-    play=play,
-    causal_online=True,
-    heading_closed_loop=True,
-    sonic_foot_terminations=True,
-    recovery_probability=RECOVERY_PROBABILITY,
-  )
-  if play:
-    cfg.commands["motion"].recovery_probability = 0.0
-  return cfg
-
-
-def _stage1_recovery_env(play: bool = False):
-  """Stage I with RGMT Sec. II-D fall recovery (docs/recovery_proxy.md).
-
-  This has to be its own task because ``recovery_probability`` decides at construction
-  time whether the assistance-force event exists. The play config retains that event
-  but disables random recovery resets by default; ``webplay --random-recovery-start``
-  can then enable deterministic, unassisted recovery visualization safely.
-  """
-  cfg = make_gmtrack_env_cfg(
-    manifest=MANIFEST_STAGE1,
-    play=play,
-    recovery_probability=RECOVERY_PROBABILITY,
-  )
-  if play:
-    cfg.commands["motion"].recovery_probability = 0.0
-  return cfg
-
-
-def _stage1_heading_env(play: bool = False):
-  """Stage-I environment with SONIC-style root-heading feedback."""
-  return make_gmtrack_env_cfg(
-    manifest=MANIFEST_STAGE1,
-    play=play,
-    heading_closed_loop=True,
-  )
-
-
-def _stage1_heading_recovery_env(play: bool = False):
-  """Heading-aware Stage I with RGMT Sec. II-D fall recovery."""
-  cfg = make_gmtrack_env_cfg(
-    manifest=MANIFEST_STAGE1,
-    play=play,
-    heading_closed_loop=True,
-    recovery_probability=RECOVERY_PROBABILITY,
-  )
-  if play:
-    cfg.commands["motion"].recovery_probability = 0.0
-  return cfg
 
 
 def _stage2_env(play: bool = False):
@@ -177,21 +112,8 @@ def _stage2_env(play: bool = False):
   )
 
 
-def _stage2_causal_env(play: bool = False):
-  """Legacy 38D causal Stage-II config retained for audit; not registered."""
-  return make_gmtrack_env_cfg(
-    manifest=MANIFEST_STRATIFIED,
-    acquisition_clips=MANIFEST_CHALLENGING,
-    consolidation_clips=MANIFEST_MASTERED,
-    acquisition_fraction=0.8,
-    require_v1_stratification=True,
-    play=play,
-    causal_online=True,
-  )
-
-
 def _stage2_heading_env(play: bool = False):
-  """Stage-II environment paired with the heading-aware Stage-I policy."""
+  """Stage II paired with the heading-aware Stage I policy."""
   return make_gmtrack_env_cfg(
     manifest=MANIFEST_HEADING_STRATIFIED,
     acquisition_clips=MANIFEST_HEADING_CHALLENGING,
@@ -200,29 +122,6 @@ def _stage2_heading_env(play: bool = False):
     require_v1_stratification=True,
     play=play,
     heading_closed_loop=True,
-  )
-
-
-def _challenging_only_env(play: bool = False):
-  """Every environment on the challenging set -- the Fine-Tuning baseline."""
-  return make_gmtrack_env_cfg(
-    manifest=MANIFEST_STRATIFIED,
-    acquisition_clips=MANIFEST_CHALLENGING,
-    require_v1_stratification=True,
-    stratification_mastered_manifest=MANIFEST_MASTERED,
-    stratification_challenging_manifest=MANIFEST_CHALLENGING,
-    play=play,
-  )
-
-
-def _mixed_env(play: bool = False):
-  """Whole post-stratification distribution without PACE role separation."""
-  return make_gmtrack_env_cfg(
-    manifest=MANIFEST_STRATIFIED,
-    require_v1_stratification=True,
-    stratification_mastered_manifest=MANIFEST_MASTERED,
-    stratification_challenging_manifest=MANIFEST_CHALLENGING,
-    play=play,
   )
 
 
@@ -238,57 +137,6 @@ register_mjlab_task(
   runner_cls=GMTrackOnPolicyRunner,
 )
 
-# Causal task IDs always include closed-loop Heading. Do not add separate
-# ``Causal-Heading`` aliases: the short causal names are the sole public entry points.
-register_mjlab_task(
-  task_id="GMTrack-Stage1-Causal-Flat-Unitree-G1",
-  env_cfg=_stage1_causal_heading_env(),
-  play_env_cfg=_stage1_causal_heading_env(play=True),
-  rl_cfg=stage1_runner_cfg(
-    causal_online=True,
-    heading_closed_loop=True,
-    experiment_name="gmtrack_stage1_causal_heading",
-  ),
-  runner_cls=GMTrackOnPolicyRunner,
-)
-
-register_mjlab_task(
-  task_id="GMTrack-Stage1-Causal-Recovery-Flat-Unitree-G1",
-  env_cfg=_stage1_causal_heading_recovery_env(),
-  play_env_cfg=_stage1_causal_heading_recovery_env(play=True),
-  rl_cfg=stage1_runner_cfg(
-    causal_online=True,
-    heading_closed_loop=True,
-    experiment_name="gmtrack_stage1_causal_heading_recovery",
-  ),
-  runner_cls=GMTrackOnPolicyRunner,
-)
-
-# Ablation of the boundary bookkeeping: identical environment and identical past-only
-# actor window, but the actor is not told which of its tokens are clamped padding.
-# The environment is shared on purpose -- the critic and the reconstruction head keep
-# their masks, so the only variable is what the actor knows.
-register_mjlab_task(
-  task_id="GMTrack-Stage1-CausalNoMask-Flat-Unitree-G1",
-  env_cfg=_stage1_causal_heading_env(),
-  play_env_cfg=_stage1_causal_heading_env(play=True),
-  rl_cfg=stage1_runner_cfg(
-    causal_online=True,
-    heading_closed_loop=True,
-    actor_boundary_masks=False,
-    experiment_name="gmtrack_stage1_causal_heading_nomask",
-  ),
-  runner_cls=GMTrackOnPolicyRunner,
-)
-
-register_mjlab_task(
-  task_id="GMTrack-Stage1-Recovery-Flat-Unitree-G1",
-  env_cfg=_stage1_recovery_env(),
-  play_env_cfg=_stage1_recovery_env(play=True),
-  rl_cfg=stage1_runner_cfg(experiment_name="gmtrack_stage1_recovery"),
-  runner_cls=GMTrackOnPolicyRunner,
-)
-
 register_mjlab_task(
   task_id="GMTrack-Stage1-Heading-Flat-Unitree-G1",
   env_cfg=_stage1_heading_env(),
@@ -298,12 +146,24 @@ register_mjlab_task(
 )
 
 register_mjlab_task(
-  task_id="GMTrack-Stage1-Heading-Recovery-Flat-Unitree-G1",
-  env_cfg=_stage1_heading_recovery_env(),
-  play_env_cfg=_stage1_heading_recovery_env(play=True),
+  task_id="GMTrack-Stage1-Causal-Flat-Unitree-G1",
+  env_cfg=_stage1_causal_env(),
+  play_env_cfg=_stage1_causal_env(play=True),
   rl_cfg=stage1_runner_cfg(
+    causal_online=True,
+    experiment_name="gmtrack_stage1_causal",
+  ),
+  runner_cls=GMTrackOnPolicyRunner,
+)
+
+register_mjlab_task(
+  task_id="GMTrack-Stage1-Causal-Heading-Flat-Unitree-G1",
+  env_cfg=_stage1_causal_heading_env(),
+  play_env_cfg=_stage1_causal_heading_env(play=True),
+  rl_cfg=stage1_runner_cfg(
+    causal_online=True,
     heading_closed_loop=True,
-    experiment_name="gmtrack_stage1_heading_recovery",
+    experiment_name="gmtrack_stage1_causal_heading",
   ),
   runner_cls=GMTrackOnPolicyRunner,
 )
@@ -320,81 +180,10 @@ register_mjlab_task(
   runner_cls=GMTrackOnPolicyRunner,
 )
 
-# No causal Stage-II task is registered yet. Causal now means causal + Heading, and a
-# valid Stage-II registration must point at a split regenerated from that exact 44D
-# Stage-I checkpoint. The existing standard/Heading splits do not satisfy that
-# provenance contract, so failing closed here is safer than exposing a mismatched task.
-
 register_mjlab_task(
   task_id="GMTrack-Stage2-Heading-Flat-Unitree-G1",
   env_cfg=_stage2_heading_env(),
   play_env_cfg=_stage2_heading_env(play=True),
   rl_cfg=stage2_runner_cfg(heading_closed_loop=True),
-  runner_cls=GMTrackOnPolicyRunner,
-)
-
-##
-# Ablations (Fig. 7, Fig. 9, Table VIII).
-##
-
-register_mjlab_task(
-  task_id="GMTrack-Stage2-NoStar-Flat-Unitree-G1",
-  env_cfg=_stage2_env(),
-  play_env_cfg=_stage2_env(play=True),
-  rl_cfg=stage2_runner_cfg(use_star=False, experiment_name="gmtrack_no_star"),
-  runner_cls=GMTrackOnPolicyRunner,
-)
-
-register_mjlab_task(
-  task_id="GMTrack-Stage2-NoCon-Flat-Unitree-G1",
-  env_cfg=_stage2_env(),
-  play_env_cfg=_stage2_env(play=True),
-  rl_cfg=stage2_runner_cfg(
-    consolidation_enabled=False, experiment_name="gmtrack_no_con"
-  ),
-  runner_cls=GMTrackOnPolicyRunner,
-)
-
-register_mjlab_task(
-  task_id="GMTrack-Stage2-FixedLambda-Flat-Unitree-G1",
-  env_cfg=_stage2_env(),
-  play_env_cfg=_stage2_env(play=True),
-  rl_cfg=stage2_runner_cfg(
-    fixed_lambda_con=0.5, experiment_name="gmtrack_fixed_lambda"
-  ),
-  runner_cls=GMTrackOnPolicyRunner,
-)
-
-register_mjlab_task(
-  task_id="GMTrack-Stage2-UnifiedEnc-Flat-Unitree-G1",
-  env_cfg=_stage2_env(),
-  play_env_cfg=_stage2_env(play=True),
-  rl_cfg=unified_encoder_runner_cfg(),
-  runner_cls=GMTrackOnPolicyRunner,
-)
-
-register_mjlab_task(
-  task_id="GMTrack-Stage2-NoFSQ-Flat-Unitree-G1",
-  env_cfg=_stage2_env(),
-  play_env_cfg=_stage2_env(play=True),
-  rl_cfg=no_fsq_runner_cfg(),
-  runner_cls=GMTrackOnPolicyRunner,
-)
-
-register_mjlab_task(
-  task_id="GMTrack-Finetune-Flat-Unitree-G1",
-  env_cfg=_challenging_only_env(),
-  play_env_cfg=_challenging_only_env(play=True),
-  rl_cfg=finetune_runner_cfg(),
-  runner_cls=GMTrackOnPolicyRunner,
-)
-
-register_mjlab_task(
-  task_id="GMTrack-MixedTraining-Flat-Unitree-G1",
-  # Mixed Training (Fig. 9): one undifferentiated pool of mastered + challenging
-  # motions optimized with plain PPO -- no role split, no consolidation constraint.
-  env_cfg=_mixed_env(),
-  play_env_cfg=_mixed_env(play=True),
-  rl_cfg=finetune_runner_cfg(),
   runner_cls=GMTrackOnPolicyRunner,
 )

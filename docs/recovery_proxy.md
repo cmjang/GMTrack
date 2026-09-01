@@ -2,8 +2,9 @@
 
 本文件只记录 RGMT `arXiv:2601.23080v1` Sec. II-D 的恢复协议，以及本仓库为了把“随机不稳定姿态”落到运行时所作的本地假设。
 
-严格任务默认 `recovery_probability = 0`。只有专门的
-`GMTrack-Stage1-Recovery-Flat-Unitree-G1` 才开启这个机制。
+所有公开 task 默认 `recovery_probability = 0`，且不再注册独立的 recovery task。
+需要研究该机制时，应在自定义配置中调用
+`make_gmtrack_env_cfg(recovery_probability=...)`。
 
 ## 论文契约
 
@@ -42,7 +43,7 @@ RGMT 只说“randomized unstable poses”，没有公开具体采样器。下�
 ## 运行备注
 
 - recovery 不是严格任务的一部分，严格任务仍然保持 `recovery_probability = 0`
-- 这个恢复任务用于复现 RGMT Sec. II-D；未公开的采样细节仍属于本地假设
+- 该配置用于研究 RGMT Sec. II-D；未公开的采样细节仍属于本地假设
 - `webplay` 的 `Recovery Test` 面板可在普通动作播放中向选中机器人施加
   `±X/±Y` 水平速度冲击；`--random-recovery-start` 则单独检查无助力随机姿态恢复
 - 如果以后换采样器，优先更新上面的“未发表的本地假设”，不要把它们误写成论文值

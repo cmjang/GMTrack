@@ -119,8 +119,8 @@ def _configure_random_recovery_rollout(env_cfg, *, nominal: bool) -> None:
   """
   if "recovery_assist" not in env_cfg.events:
     raise ValueError(
-      "Random recovery visualization requires a task constructed with recovery "
-      "enabled, such as 'GMTrack-Stage1-Recovery-Flat-Unitree-G1'."
+      "Random recovery visualization requires an environment config constructed "
+      "with recovery enabled."
     )
 
   motion_cfg = env_cfg.commands["motion"]

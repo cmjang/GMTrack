@@ -434,35 +434,39 @@ def test_env_cfg_keeps_recovery_as_an_explicit_proxy():
   assert "recovery_assist" not in play.events
 
 
-def test_recovery_is_a_registered_task_not_a_cli_flag():
+def test_recovery_requires_config_construction_not_a_cli_flag():
   """`recovery_probability` gates term *construction*, so raising it on an
   already-built strict config yields fallen resets and a termination shield with no
   assistance force at all -- RGMT's only mechanism for escaping fallen states."""
-  from gmtrack import (
-    _stage1_causal_heading_recovery_env,
-    _stage1_causal_recovery_env,
-    _stage1_env,
-    _stage1_recovery_env,
-  )
+  from gmtrack import _stage1_env
+  from gmtrack.envs.env_cfg import RECOVERY_PROBABILITY, make_gmtrack_env_cfg
 
-  recovery = _stage1_recovery_env()
+  manifest = _stage1_env().commands["motion"].manifest
+  recovery = make_gmtrack_env_cfg(
+    manifest=manifest,
+    recovery_probability=RECOVERY_PROBABILITY,
+  )
   assert recovery.commands["motion"].recovery_probability == 0.15
   assert "recovery_assist" in recovery.events
   assert "recovery_assist" not in recovery.observations["critic"].terms
-  # play stays clean so the task can still be replayed deterministically
-  assert _stage1_recovery_env(play=True).commands["motion"].recovery_probability == 0.0
+  play = make_gmtrack_env_cfg(
+    manifest=manifest,
+    recovery_probability=RECOVERY_PROBABILITY,
+    play=True,
+  )
+  assert play.commands["motion"].recovery_probability == 0.0
 
-  for causal_recovery_factory in (
-    _stage1_causal_recovery_env,
-    _stage1_causal_heading_recovery_env,
-  ):
-    train = causal_recovery_factory()
+  for heading_closed_loop in (False, True):
+    train = make_gmtrack_env_cfg(
+      manifest=manifest,
+      causal_online=True,
+      heading_closed_loop=heading_closed_loop,
+      sonic_foot_terminations=True,
+      recovery_probability=RECOVERY_PROBABILITY,
+    )
     assert train.commands["motion"].recovery_probability == 0.15
     assert "recovery_assist" in train.events
     assert {"foot_pos_xy", "foot_pos_z"} <= set(train.terminations)
-    assert (
-      causal_recovery_factory(play=True).commands["motion"].recovery_probability == 0.0
-    )
 
   # The broken CLI path must now fail loudly instead of training without the force.
   faked_cli = _stage1_env()

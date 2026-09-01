@@ -14,12 +14,8 @@ import pytest
 import torch
 
 from gmtrack import (
-  MANIFEST_CHALLENGING,
-  MANIFEST_MASTERED,
   MANIFEST_STAGE1,
   MANIFEST_STRATIFIED,
-  _challenging_only_env,
-  _mixed_env,
   _stage1_env,
   _stage2_env,
 )
@@ -167,20 +163,6 @@ def test_stage_manifests_and_episode_boundaries_follow_paper_order():
   assert stage2.commands["motion"].require_v1_stratification is True
   assert stage1.episode_length_s == 10.0
   assert stage1.terminations["motion_sequence_end"].time_out is True
-
-
-def test_strict_ablation_validation_is_independent_of_sampling_pool():
-  finetune = _challenging_only_env().commands["motion"]
-  mixed = _mixed_env().commands["motion"]
-
-  for motion in (finetune, mixed):
-    assert motion.require_v1_stratification is True
-    assert motion.stratification_mastered_manifest == MANIFEST_MASTERED
-    assert motion.stratification_challenging_manifest == MANIFEST_CHALLENGING
-  assert finetune.acquisition_clips == MANIFEST_CHALLENGING
-  assert finetune.acquisition_fraction is None
-  assert mixed.acquisition_clips is None
-  assert mixed.consolidation_clips is None
 
 
 def test_stage2_randomization_is_role_masked_and_nominal_play_is_clean():

@@ -20,7 +20,7 @@ BASE_STAGE1 = "GMTrack-Stage1-Flat-Unitree-G1"
 HEADING_STAGE1 = "GMTrack-Stage1-Heading-Flat-Unitree-G1"
 HEADING_STAGE2 = "GMTrack-Stage2-Heading-Flat-Unitree-G1"
 CAUSAL_STAGE1 = "GMTrack-Stage1-Causal-Flat-Unitree-G1"
-CAUSAL_RECOVERY_STAGE1 = "GMTrack-Stage1-Causal-Recovery-Flat-Unitree-G1"
+CAUSAL_HEADING_STAGE1 = "GMTrack-Stage1-Causal-Heading-Flat-Unitree-G1"
 
 
 def test_heading_tasks_are_registered_without_changing_the_paper_baseline():
@@ -55,12 +55,13 @@ def test_heading_task_trains_yaw_recovery_but_play_starts_aligned():
 def test_causal_heading_combines_past_only_actor_and_heading_feedback():
   tasks = list_tasks()
   baseline = load_env_cfg(BASE_STAGE1)
-  train = load_env_cfg(CAUSAL_STAGE1)
-  play = load_env_cfg(CAUSAL_STAGE1, play=True)
-  runner = load_rl_cfg(CAUSAL_STAGE1)
+  train = load_env_cfg(CAUSAL_HEADING_STAGE1)
+  play = load_env_cfg(CAUSAL_HEADING_STAGE1, play=True)
+  runner = load_rl_cfg(CAUSAL_HEADING_STAGE1)
   motion = train.commands["motion"]
 
   assert CAUSAL_STAGE1 in tasks
+  assert CAUSAL_HEADING_STAGE1 in tasks
   assert motion.heading_closed_loop is True
   assert motion.require_causal_window is True
   assert motion.command_window_offsets == CAUSAL_ACTOR_WINDOW_OFFSETS
@@ -146,21 +147,3 @@ def test_heading_stage2_requires_the_matching_heading_actor_shape():
   assert stage1.actor.command_token_dim == stage2.actor.command_token_dim == 44
   assert stage1.experiment_name == "gmtrack_stage1_heading"
   assert stage2.experiment_name == "gmtrack_stage2_heading"
-
-
-def test_causal_heading_recovery_combines_all_requested_protocols():
-  train = load_env_cfg(CAUSAL_RECOVERY_STAGE1)
-  play = load_env_cfg(CAUSAL_RECOVERY_STAGE1, play=True)
-  runner = load_rl_cfg(CAUSAL_RECOVERY_STAGE1)
-
-  assert CAUSAL_RECOVERY_STAGE1 in list_tasks()
-  motion = train.commands["motion"]
-  assert motion.require_causal_window is True
-  assert motion.heading_closed_loop is True
-  assert motion.recovery_probability == 0.15
-  assert "recovery_assist" in train.events
-  assert {"foot_pos_xy", "foot_pos_z"} <= set(train.terminations)
-  assert play.commands["motion"].recovery_probability == 0.0
-  assert "recovery_assist" in play.events
-  assert runner.actor.command_token_dim == 44
-  assert runner.experiment_name == "gmtrack_stage1_causal_heading_recovery"

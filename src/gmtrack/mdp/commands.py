@@ -147,13 +147,13 @@ class MultiMotionCommand(CommandTerm):
       # config -- which is all a `--env.commands.motion.recovery-probability` override
       # can do -- gives fallen resets and a termination shield with no upward force at
       # all. That silently removes the one mechanism RGMT Sec. II-D provides for
-      # escaping fallen states. Use the GMTrack-Stage1-Recovery-* task instead.
+      # escaping fallen states.
       if "recovery_assist" not in env.cfg.events:
         raise ValueError(
           "recovery_probability > 0 but the environment has no 'recovery_assist' "
           "event term: the assistance force can only be built by calling "
           "make_gmtrack_env_cfg(recovery_probability=...), not by overriding the "
-          "command afterwards. Use the GMTrack-Stage1-Recovery-Flat-Unitree-G1 task."
+          "command afterwards."
         )
       root_low, root_high = cfg.recovery_root_height_range
       if root_low < 0.0 or root_low > root_high:
