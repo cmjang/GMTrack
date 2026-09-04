@@ -1,4 +1,4 @@
-"""Observation terms for Extreme-RGMT.
+"""Observation terms for GMTrack.
 
 The first four functions are vendored from mjlab's tracking task
 (``mjlab/tasks/tracking/mdp/observations.py``) with the command type swapped for
@@ -177,7 +177,7 @@ def robot_body_ori_b(env: ManagerBasedRlEnv, command_name: str) -> torch.Tensor:
 
 
 ##
-# Extreme-RGMT: command encoder input.
+# GMTrack: command encoder input.
 ##
 
 
@@ -286,7 +286,7 @@ def motion_ref_root_height(env: ManagerBasedRlEnv, command_name: str) -> torch.T
 
 
 ##
-# Extreme-RGMT: STAR metadata.
+# GMTrack: STAR metadata.
 ##
 
 

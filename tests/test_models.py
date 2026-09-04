@@ -1,4 +1,4 @@
-"""Tests for the Extreme-RGMT policy architecture."""
+"""Tests for the GMTrack policy architecture."""
 
 from __future__ import annotations
 

@@ -1,4 +1,4 @@
-"""Event terms for Extreme-RGMT.
+"""Event terms for GMTrack.
 
 The paper applies its perturbation protocol to all Stage-I environments but only the
 acquisition role in Stage II (Sec. IV-B2).  mjlab's built-in event functions operate

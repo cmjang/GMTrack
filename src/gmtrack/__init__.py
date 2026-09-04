@@ -1,7 +1,7 @@
-"""Extreme-RGMT: continual learning of highly dynamic humanoid skills.
+"""GMTrack: continual learning of highly dynamic humanoid skills.
 
-Reproduction of arXiv:2607.20110 on top of mjlab. Importing this package registers
-every task with mjlab's registry; mjlab auto-imports it through the
+Built on top of mjlab. Importing this package registers every task with mjlab's
+registry; mjlab auto-imports it through the
 ``[project.entry-points."mjlab.tasks"]`` hook, so ``uv run train GMTrack-...`` works
 without any code change inside mjlab.
 """

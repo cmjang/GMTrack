@@ -1,7 +1,7 @@
 """Packed multi-clip motion library.
 
 mjlab's ``MotionLoader`` (``mjlab/tasks/tracking/mdp/commands.py``) holds exactly one
-motion clip. Extreme-RGMT trains a *generalist* tracker over a multi-source
+motion clip. GMTrack trains a *generalist* tracker over a multi-source
 distribution of thousands of clips (paper Table IV: 3.1 h across LAFAN1 / AMASS /
 in-house Xsens), and Stage II additionally needs to sample disjoint subsets
 (mastered vs challenging) per environment group.

@@ -1,4 +1,4 @@
-"""MDP terms for Extreme-RGMT.
+"""MDP terms for GMTrack.
 
 Mirrors the layout of ``mjlab.tasks.tracking.mdp``: star-import mjlab's generic
 terms, then shadow/extend them with the task-specific ones defined here.

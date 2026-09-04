@@ -6,8 +6,8 @@ as an external task package for [mjlab](https://github.com/mujocolab/mjlab).
 [![Built on mjlab](https://img.shields.io/badge/built%20on-mjlab-4c1.svg)](https://github.com/mujocolab/mjlab)
 [![Python](https://img.shields.io/badge/python-3.10%E2%80%933.13-blue.svg)](https://www.python.org/)
 
-Two-stage continual learning (PACE + STAR) on top of the mjlab/BeyondMimic tracking
-stack, referencing Extreme-RGMT, SONIC and InstinctLab.
+GMTrack provides a two-stage continual-learning pipeline for dynamic humanoid motion
+tracking on top of the mjlab/BeyondMimic stack.
 
 mjlab already ships a BeyondMimic reimplementation under `mjlab/tasks/tracking/`, so
 GMTrack plugs into mjlab instead of forking it: tasks register through mjlab's
@@ -16,7 +16,7 @@ entry-point hook, and the learning code subclasses rsl-rl.
 ## Method
 
 ```
-D — all motion data (paper Table IV)
+D — all motion data
 │
 ├─ Stage I ─ plain PPO + adaptive bin sampling over all of D ──────────────► π_base
 │
@@ -135,8 +135,8 @@ uv run python -m gmtrack.scripts.stratify \
 
 This produces `stratified.json`, `mastered.json`, `challenging.json` and
 `stratification_report.json`. The four files share one provenance hash and are validated
-as a set; hand-edited splits fail closed. Against paper Table V, `D_c` should land around
-10% of the corpus — close to half means Stage I is undertrained.
+as a set; hand-edited splits fail closed. A large `D_c` split usually means Stage I needs
+more training.
 
 ### 4. Stage II
 
@@ -181,18 +181,8 @@ robot-to-reference pelvis orientation error to each command token.
 
 ## Motion data
 
-The paper trains Stage I on 3.096 h of retargeted 50 Hz motion:
-
-| Source | Paper duration | Availability |
-|---|---|---|
-| LAFAN1 | 2.444 h | public — [lvhaidong/LAFAN1_Retargeting_Dataset](https://huggingface.co/datasets/lvhaidong/LAFAN1_Retargeting_Dataset), drop the CSVs into `data/datasets/raw/lafan1/` |
-| AMASS | 0.511 h | needs your own retargeting to G1 |
-| In-house Xsens captures | 0.141 h | not public |
-
-Because the Xsens high-dynamic slice is unavailable, the registered Stage-I task defaults
-to a duration-matched **proxy** built from public high-dynamic sources (screened
-MotionDecode and BONES-SEED takes plus representative cartwheels). Any experiment report
-using it must say so — it is not the paper's data distribution.
+GMTrack expects retargeted 50 Hz Unitree G1 motions. A Stage-I manifest can combine
+LAFAN1, AMASS, MotionDecode, BONES-SEED, and local motion captures as needed.
 
 Motion payloads are ignored by git. Point the registry at a local dataset without
 touching source code:
@@ -209,29 +199,18 @@ Two conversion rules:
 
 - **Body ordering follows MuJoCo's depth-first convention.** IsaacLab-derived converters
   silently track the wrong links, so use `prepare_motions` (or mjlab's `csv_to_npz`).
-- **Proxy clips retargeted from other skeletons are ground-aligned upward** against all
+- **Clips retargeted from other skeletons are ground-aligned upward** against all
   29 active G1 collision geoms with a 3 mm clearance gate, re-differentiating root
-  velocity afterwards. That threshold is a local data-cleaning choice, not a paper
-  parameter.
+  velocity afterwards.
 
 ## Evaluation protocol
 
-Following Sec. VI-A, the only failure criterion is root height deviating from the
-reference by more than 0.2 m. Each rollout runs from the reference's first frame to its
-end or to failure, and metrics are Succ. / `E_MPJPE` (mm, root-relative) / `d_vel`
-(mm/frame) / `d_acc` (mm/frame²), averaged over five training seeds.
+A rollout fails when root height deviates from the reference by more than 0.2 m. Each
+rollout runs from the reference's first frame to its end or to failure, and metrics are
+Succ. / `E_MPJPE` (mm, root-relative) / `d_vel` (mm/frame) / `d_acc` (mm/frame²).
 
-The paper's four test sets are all distinct from `D_c` — `D_c` is a training set, and
-numbers on it cannot be compared to Table VI. Extreme-RGMT's published values, as Succ. / `E_MPJPE`:
-
-| Category | Test set | Stage I | Full (Stage II) |
-|---|---|---|---|
-| Generalist | In-source Motion (held out from LAFAN1 + AMASS) | 99.54% / 40.07 mm | 99.76% / 40.79 mm |
-| Generalist | Unseen Motion (independent video reconstructions) | 95.13% / 45.80 mm | 96.68% / 46.91 mm |
-| Specialist | XtremeMotion (public OmniXtreme high-dynamic set) | 21.42% / 46.72 mm | 100.00% / 40.18 mm |
-| Specialist | AMASS Challenging (hard AMASS motions, direct retarget) | 18.18% / 55.17 mm | 90.91% / 46.39 mm |
-
-The specialist gap is what Stage II is for.
+Keep final evaluation sets separate from `D_c`: `D_c` is part of the training split
+and should not be used to report held-out performance.
 
 ## Checkpoints
 
@@ -262,7 +241,6 @@ Conventions:
 - Prefer raising over defensive fallbacks. A silent clamp or `getattr(..., default)`
   hides the class of bug that is hardest to find here: a plausible but wrong reference
   frame.
-- Every paper constant carries a comment naming the table or equation it comes from.
 
 ### Project layout
 
@@ -270,7 +248,7 @@ Conventions:
 |---|---|
 | `src/gmtrack/pace.py` | acquisition/consolidation environment split |
 | `src/gmtrack/mdp/` | motion library, adaptive sampling, commands, observations, rewards, terminations, events |
-| `src/gmtrack/envs/env_cfg.py` | full environment configuration (paper Tables I–II) |
+| `src/gmtrack/envs/env_cfg.py` | full environment configuration |
 | `src/gmtrack/rsl_rl/models.py` | three-branch encoder, causal attention, actor/critic |
 | `src/gmtrack/rsl_rl/fsq.py` | finite scalar quantization bottleneck |
 | `src/gmtrack/rsl_rl/ppo_pace.py` | PACE objectives and adaptive `λ_con` |
@@ -278,11 +256,8 @@ Conventions:
 | `src/gmtrack/motion_grounding.py` | collision-geometry ground alignment |
 | `src/gmtrack/scripts/` | data preparation, stratification, evaluation, viewers |
 
-## References
+## Dependencies
 
-- *Extreme-RGMT: Continual Learning of Highly Dynamic Skills for Robust Generalist
-  Humanoid Control* — [arXiv:2607.20110](https://arxiv.org/abs/2607.20110) — and its
-  predecessor *RGMT* — [arXiv:2601.23080](https://arxiv.org/abs/2601.23080).
 - [InstinctLab](https://github.com/project-instinct/InstinctLab) and
   [SONIC](https://github.com/NVlabs/GR00T-WholeBodyControl).
 - [mjlab](https://github.com/mujocolab/mjlab) and

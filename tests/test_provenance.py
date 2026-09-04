@@ -244,10 +244,10 @@ def test_causal_schema_rejects_legacy_checkpoint_without_fingerprint():
 
 
 def test_pre_rename_checkpoints_are_validated_under_the_old_project_key():
-  """Renaming Ex-GRMT to GMTrack must not turn a fingerprint into "no fingerprint"."""
+  """A renamed schema key must not turn a fingerprint into "no fingerprint"."""
   causal = _observation_schema(list(range(-20, 1)), use_past_valid_mask=True)
   baseline = _observation_schema(list(range(-10, 11)), use_past_valid_mask=False)
-  legacy = {"ex_grmt_observation_schema": causal}
+  legacy = {"legacy_observation_schema": causal}
 
   validate_checkpoint_observation_schema(legacy, causal, require_present=True)
   # The dangerous case: a legacy-ABI task would silently skip the comparison if the

@@ -405,7 +405,7 @@ class MultiMotionCommand(CommandTerm):
   def robot_anchor_ang_vel_w(self) -> torch.Tensor:
     return self.robot.data.body_link_ang_vel_w[:, self.robot_anchor_body_index]
 
-  # -- Extreme-RGMT specific outputs ----------------------------------------
+  # -- GMTrack specific outputs ----------------------------------------
 
   def _tokens_at(self, idx: torch.Tensor) -> torch.Tensor:
     """Build reference tokens at packed-library frame indices.
@@ -610,7 +610,7 @@ class MultiMotionCommand(CommandTerm):
       return
 
     draw = torch.rand(env_ids.shape[0], device=self.device) < cfg.recovery_probability
-    # Recovery belongs to the training perturbation protocol, which Extreme-RGMT
+    # Recovery belongs to the training perturbation protocol, which GMTrack
     # applies "during Stage I and in the acquisition environments of Stage II"
     # (Sec. IV-B2). Consolidation environments must stay clean: their rollouts feed
     # the pi_ref alignment loss (Eq. 15), and pi_ref never saw fallen states.
@@ -1198,14 +1198,14 @@ class MultiMotionCommandCfg(CommandTermCfg):
   heading_closed_loop: bool = False
   """Append SONIC-style closed-loop relative pelvis orientation to every token.
 
-  False preserves the Extreme-RGMT command exactly at 38 channels per token. True
+  False preserves the GMTrack command exactly at 38 channels per token. True
   appends the first two rotation-matrix columns of
   ``q_robot_current^-1 * q_ref_future``, producing 44 channels per token.
   """
 
   recovery_probability: float = 0.0
   """Probability that a resetting environment becomes a recovery environment.
-  RGMT (arXiv:2601.23080v1) Sec. II-D uses 0.15; Extreme-RGMT inherits the mechanism
+  RGMT (arXiv:2601.23080v1) Sec. II-D uses 0.15; GMTrack inherits the mechanism
   without restating it. 0 disables fall-recovery training entirely -- the play,
   evaluation and stratification paths rely on that."""
   recovery_window_s: float = 3.0

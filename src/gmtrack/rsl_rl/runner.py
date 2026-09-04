@@ -1,11 +1,11 @@
-"""On-policy runner for Extreme-RGMT.
+"""On-policy runner for GMTrack.
 
 Differences from mjlab's ``MotionTrackingOnPolicyRunner``:
 
 * **No motion data is bundled into the ONNX file.** mjlab's tracking runner packs the
   whole reference clip into the exported model as buffers, which works for
   single-clip replay but is untenable for a multi-hour library -- and is the wrong
-  interface anyway. Extreme-RGMT's deployment target is *online teleoperation*, where
+  interface anyway. GMTrack's deployment target is *online teleoperation*, where
   the reference window arrives frame by frame from an inertial capture stream, so the
   exported policy takes the reference window as an ordinary input.
   :class:`~gmtrack.rsl_rl.models.GMTrackActor` exposes the named inputs the on-robot

@@ -15,12 +15,12 @@ from typing import Any
 
 STRATIFICATION_SCHEMA = "gmtrack.stage2_stratification"
 STRATIFICATION_SCHEMA_VERSION = 1
-STRATIFICATION_PROTOCOL = "extreme-rgmt-sec-iv-c-v1"
+STRATIFICATION_PROTOCOL = "gmtrack-stage2-stratification-v1"
 
 PAPER_ARXIV_ID = "2607.20110v1"
 PAPER_SHA256 = "55cca5c02f16c659e4ab3baf08d9ad1fb69865f37cfba084958ade0911cf51fe"
 
-# Extreme-RGMT Sec. IV-C.
+# Stage-II stratification defaults.
 STRATIFICATION_TRIALS = 5
 STRATIFICATION_THRESHOLD = 0.8
 STRATIFICATION_MAX_CLIP_SECONDS = 10.0

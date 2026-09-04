@@ -1,4 +1,4 @@
-"""Focused regression tests for the Extreme-RGMT adaptive sampler."""
+"""Focused regression tests for the GMTrack adaptive sampler."""
 
 from __future__ import annotations
 

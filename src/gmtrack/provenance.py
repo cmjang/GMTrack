@@ -1,8 +1,7 @@
-"""Reproducibility metadata for the fixed Extreme-RGMT v1 protocol.
+"""Reproducibility metadata for the fixed GMTrack v1 protocol.
 
-The paper does not publish every dataset and simulator parameter.  A run is therefore
-only auditable when the exact public-paper revision, proxy inputs and dirty source
-tree are recorded alongside its checkpoints.
+A run is auditable when its protocol revision, inputs, and source-tree state are
+recorded alongside its checkpoints.
 """
 
 from __future__ import annotations
@@ -24,12 +23,7 @@ PUSH_INTERVAL_SOURCE = "2607.20110v1 Table II"
 PUSH_MAGNITUDE_SOURCE = "InstinctLab proxy; 2607.20110v1 does not publish magnitude"
 OBSERVATION_SCHEMA_VERSION = 2
 CHECKPOINT_OBSERVATION_SCHEMA_KEY = "gmtrack_observation_schema"
-# Checkpoints written before the 2026-09-01 rename store the identical payload under
-# the project's former name. This is read-only compatibility for an on-disk key, not a
-# fallback for missing data: dropping it would make `require_present=False` tasks treat
-# a renamed key as "no fingerprint" and skip the comparison entirely, which is exactly
-# the silent-acceptance failure this validation exists to prevent.
-LEGACY_CHECKPOINT_OBSERVATION_SCHEMA_KEYS = ("ex_grmt_observation_schema",)
+CHECKPOINT_OBSERVATION_SCHEMA_SUFFIX = "_observation_schema"
 
 
 def sha256_file(path: str | Path) -> str:
@@ -266,17 +260,21 @@ def validate_checkpoint_observation_schema(
   Pre-rename checkpoints carry the fingerprint under the old project key and are
   validated exactly as strictly as current ones.
   """
-  key = next(
-    (
-      candidate
-      for candidate in (
-        CHECKPOINT_OBSERVATION_SCHEMA_KEY,
-        *LEGACY_CHECKPOINT_OBSERVATION_SCHEMA_KEYS,
-      )
-      if candidate in checkpoint
-    ),
-    None,
+  legacy_keys = sorted(
+    key
+    for key in checkpoint
+    if isinstance(key, str)
+    and key != CHECKPOINT_OBSERVATION_SCHEMA_KEY
+    and key.endswith(CHECKPOINT_OBSERVATION_SCHEMA_SUFFIX)
   )
+  if CHECKPOINT_OBSERVATION_SCHEMA_KEY in checkpoint:
+    key = CHECKPOINT_OBSERVATION_SCHEMA_KEY
+  elif len(legacy_keys) == 1:
+    key = legacy_keys[0]
+  elif len(legacy_keys) > 1:
+    raise ValueError("Checkpoint has multiple legacy observation-schema fingerprints.")
+  else:
+    key = None
   if key is None:
     if require_present:
       raise ValueError(

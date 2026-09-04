@@ -1,7 +1,7 @@
 [project]
 name = "gmtrack"
 version = "0.1.0"
-description = "GMTrack: unofficial reproduction of highly dynamic humanoid motion tracking on the Unitree G1, following Extreme-RGMT (arXiv:2607.20110) with SONIC/BeyondMimic reference values"
+description = "Highly dynamic humanoid whole-body motion tracking on the Unitree G1"
 readme = "README.md"
 requires-python = ">=3.10,<3.14"
 dependencies = [

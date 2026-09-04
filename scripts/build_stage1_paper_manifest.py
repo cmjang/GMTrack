@@ -1,4 +1,4 @@
-"""Build the Stage-I manifest whose source mix matches Extreme-RGMT Table IV.
+"""Build the Stage-I manifest from the configured motion sources.
 
 Table IV gives the paper's Stage-I corpus as 3.096 h:
   LAFAN1 2.444 h (78.94%) | AMASS 0.511 h (16.51%) | in-house Xsens 0.141 h (4.55%)

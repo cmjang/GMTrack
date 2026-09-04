@@ -4,7 +4,7 @@ mjlab converts these to the raw ``train_cfg`` dict with ``dataclasses.asdict`` a
 rsl-rl splats them into the constructors, so any field added here shows up as a
 keyword argument of the corresponding class. mjlab also builds its tyro CLI from the
 *annotations*, which is why the runner cfg re-annotates ``actor`` -- inheriting the
-base annotation would hide every Extreme-RGMT knob from ``uv run train``.
+base annotation would hide every GMTrack knob from ``uv run train``.
 """
 
 from __future__ import annotations
@@ -117,7 +117,7 @@ class PacePpoAlgorithmCfg(RslRlPpoAlgorithmCfg):
 
 @dataclass
 class GMTrackRunnerCfg(RslRlOnPolicyRunnerCfg):
-  """Runner config wiring the Extreme-RGMT actor, critic and algorithm together."""
+  """Runner config wiring the GMTrack actor, critic and algorithm together."""
 
   class_name: str = "OnPolicyRunner"
   actor: GMTrackActorCfg = field(default_factory=GMTrackActorCfg)

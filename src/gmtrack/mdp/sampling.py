@@ -6,7 +6,7 @@ from a normalised, uniform-mixed distribution over those bins so that hard segme
 get visited more often.
 
 mjlab implements this for a *single* clip inside ``MotionCommand._adaptive_sampling``.
-Extreme-RGMT applies it to a whole motion set (the full set ``D`` in Stage I, the
+GMTrack applies it to a whole motion set (the full set ``D`` in Stage I, the
 challenging set ``D_c`` in Stage II's acquisition environments), so the bin
 distribution here spans every (clip, bin) pair in the subset.
 

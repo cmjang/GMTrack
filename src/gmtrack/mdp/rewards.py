@@ -1,4 +1,4 @@
-"""Reward terms for Extreme-RGMT.
+"""Reward terms for GMTrack.
 
 The six motion-tracking terms are vendored verbatim from mjlab's tracking task
 (``mjlab/tasks/tracking/mdp/rewards.py``) so they sit next to the ones we add and can

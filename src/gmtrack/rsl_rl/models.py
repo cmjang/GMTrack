@@ -1,4 +1,4 @@
-"""Extreme-RGMT policy architecture (paper Sec. IV-A, Fig. 3, Table III).
+"""GMTrack policy architecture.
 
 Data flow::
 
@@ -21,14 +21,11 @@ as training-time regularization. The explicit-intent variant also appends the
 posterior mean, predicted from causal inputs, to the actor trunk; its future targets
 and decoder remain training-only.
 
-Extreme-RGMT leaves both attention blocks' internals unspecified; they come from
-RGMT (arXiv:2601.23080v1), whose Eq. 10-11 and Eq. 15 spell out pre-LN residual
-sublayers (MHA + MLP), a final LayerNorm, and element-wise max pooling over time
-for the history branch. These details are load-bearing: with a plain post-LN
+The attention blocks follow RGMT's pre-LN residual design: MHA and MLP sublayers,
+a final LayerNorm, and element-wise max pooling over time for the history branch.
+These details are load-bearing: with a plain post-LN
 attention layer instead, the actor's output moves so much per optimizer step that
-the adaptive-KL schedule floors the learning rate permanently (verified by
-training probes; the paper authors confirmed they train with the adaptive schedule
-exactly as published).
+the adaptive-KL schedule floors the learning rate permanently in training probes.
 
 Note that Eq. (8) defines ``Z^g`` as *encoded* command tokens only -- the command
 branch has no self-attention of its own, it supplies keys and values directly. We
@@ -251,10 +248,8 @@ class GMTrackActor(MLPModel):
     self.command_norm = nn.LayerNorm(token_dim)
 
     # -- positional encodings --
-    # RGMT Eq. 9 / Eq. 14 specify *sinusoidal* positional encodings for both token
-    # streams, and Extreme-RGMT never overrides that (Eq. 8 just says "temporal
-    # positional embedding"), so under the inheritance rule the fixed encoding
-    # governs. Buffers, not parameters: they are deterministic functions of shape.
+    # Both token streams use fixed sinusoidal positional encodings. Store them as
+    # buffers because they are deterministic functions of shape.
     hist_tokens = history_length if unified_encoder else 2 * history_length
     self.num_hist_tokens = hist_tokens
     self.register_buffer(
@@ -279,10 +274,9 @@ class GMTrackActor(MLPModel):
       command_pos = sinusoidal_positional_encoding_at(normalized_offsets, token_dim)
     self.register_buffer("command_pos", command_pos, persistent=False)
 
-    # -- causal history encoder (Eq. 7; block internals per RGMT Eq. 10-11) --
-    # Extreme-RGMT leaves Enc_hist unspecified and "builds on the controller design
-    # in [5]"; RGMT (arXiv:2601.23080v1) Eq. 10 defines it as a *pre-LN* residual
-    # block -- H1 = H0 + MHA(LN(H0)), H2 = H1 + MLP(LN(H1)), Hbar = LN(H2) -- with
+    # -- causal history encoder --
+    # This follows RGMT's *pre-LN* residual block:
+    # H1 = H0 + MHA(LN(H0)), H2 = H1 + MLP(LN(H1)), Hbar = LN(H2), with
     # element-wise max pooling over time (Eq. 11). Pre-LN keeps the block's output
     # sensitivity to weight updates bounded; the earlier post-LN simplification made
     # every Adam step move the policy so far that the adaptive-KL schedule pinned

@@ -862,7 +862,7 @@ def _conversion_provenance(
     ).hexdigest()
   if cfg.input_format == "motiondecode":
     provenance["paper_status"] = (
-      "MotionDecode extension/proxy; not an Extreme-RGMT Table IV source."
+      "MotionDecode extension/proxy; not part of the default Stage-I source mix."
     )
   return provenance
 

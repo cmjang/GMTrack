@@ -1,4 +1,4 @@
-"""Termination terms for Extreme-RGMT."""
+"""Termination terms for GMTrack."""
 
 from __future__ import annotations
 

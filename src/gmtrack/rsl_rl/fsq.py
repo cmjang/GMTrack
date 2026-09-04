@@ -11,7 +11,7 @@ ASSUMPTION: the paper states the token layout (2 x 32) but not the number of
 quantization levels per dimension. Following the SONIC training release under
 ``cankao/GR00T-WholeBodyControl``, whose universal tokenizer uses the same 2 x 32
 layout, we use 32 levels per dimension as the unpublished-detail proxy. It remains a
-config knob (``fsq_levels``) and is not claimed as a GMTrack paper value.
+config knob (``fsq_levels``).
 """
 
 from __future__ import annotations

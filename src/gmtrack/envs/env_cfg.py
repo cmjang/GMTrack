@@ -1,4 +1,4 @@
-"""Extreme-RGMT environment configurations for the Unitree G1 (29 DoF).
+"""GMTrack environment configurations for the Unitree G1 (29 DoF).
 
 Built from scratch rather than by mutating ``mjlab.tasks.tracking.make_tracking_env_cfg``
 because the observation layout differs substantially: the paper's actor consumes
@@ -140,8 +140,8 @@ def command_window_noise(
 ) -> tuple[float, ...]:
   """Per-channel command-window noise for the 38D or heading-aware 44D token.
 
-  The first 38 magnitudes are the unchanged Extreme-RGMT Table-II values. The
-  opt-in six-dimensional relative orientation follows SONIC's 0.05 magnitude.
+  The base 38-dimensional token uses the default tracking-noise magnitudes. The
+  opt-in six-dimensional relative orientation uses a 0.05 magnitude.
   """
   token = _COMMAND_TOKEN_NOISE + ((0.05,) * 6 if heading_closed_loop else ())
   return token * num_window_tokens
@@ -163,7 +163,7 @@ VELOCITY_RANGE = {
   "yaw": (-0.78, 0.78),
 }
 
-# Fall recovery -- RGMT (arXiv:2601.23080v1) Sec. II-D. Extreme-RGMT builds on RGMT's
+# Fall recovery -- RGMT (arXiv:2601.23080v1) Sec. II-D. GMTrack builds on RGMT's
 # controller/training design and demonstrates landing recovery on hardware, but never
 # restates the mechanism. Recovery poses are generated at runtime and do not require
 # fall/get-up demonstrations or a separate motion corpus.
@@ -241,8 +241,8 @@ def _critic_terms() -> dict[str, ObservationTermCfg]:
 
   RGMT Eq. 1 includes the previous action inside ``o_t``; ``g_t`` is the *single*
   current reference token (Eq. 2), not the actor's 21-token window; the privileged
-  block is exactly ``[h_t^ref, x_t^link, v_t]``. Extreme-RGMT Sec. III-B repeats the
-  same categories. An earlier revision additionally fed the critic the full command
+  block is exactly ``[h_t^ref, x_t^link, v_t]``. An earlier revision additionally
+  fed the critic the full command
   window plus reference joint targets -- more information than the paper's critic,
   which shifts value estimates and hence GAE/STAR advantage statistics.
   """
@@ -291,7 +291,7 @@ def make_gmtrack_env_cfg(
   causal_online: bool = False,
   sonic_foot_terminations: bool = False,
 ) -> ManagerBasedRlEnvCfg:
-  """Build the Extreme-RGMT tracking environment.
+  """Build the GMTrack tracking environment.
 
   Args:
     manifest: Complete-sequence Stage-I manifest or post-Stage-I logical-clip manifest.
@@ -301,8 +301,7 @@ def make_gmtrack_env_cfg(
     play: Deterministic replay mode (no corruption, no pushes, no RSI noise).
     sim_hz: Physics rate (= simulated PD rate). See :data:`DEFAULT_SIM_HZ`.
     experimental_rsi: Enable the pose/velocity/joint reset jitter inherited from
-      mjlab. It is not part of Extreme-RGMT's published perturbation protocol and is
-      disabled in the faithful configuration.
+      mjlab. It is disabled by default.
     heading_closed_loop: Append SONIC-style relative root orientation to each command
       token. Training resets receive yaw-only jitter of +/-0.2 rad so the feedback is
       exercised; play remains deterministic. False preserves the 38D baseline.
@@ -318,9 +317,9 @@ def make_gmtrack_env_cfg(
     causal_online: Use the configurable strictly causal actor window, a training-only
       stochastic intent reconstruction objective, and a history-conditioned
       privileged critic with a masked future reference window.
-    sonic_foot_terminations: Add SONIC-inspired foot guards: 0.20 m horizontal
+    sonic_foot_terminations: Add optional foot guards: 0.20 m horizontal
       placement error after pelvis-XY/yaw realignment and 0.15 m vertical tracking
-      error. This is opt-in because neither threshold is part of Extreme-RGMT Table I.
+      error.
   """
   if abs(sim_hz / POLICY_HZ - round(sim_hz / POLICY_HZ)) > 1e-9:
     raise ValueError(
@@ -529,8 +528,8 @@ def make_gmtrack_env_cfg(
       velocity_range=VELOCITY_RANGE if experimental_rsi else {},
       joint_position_range=(-0.1, 0.1) if experimental_rsi else (0.0, 0.0),
       sampling_mode="adaptive",
-      # Recovery comes from RGMT rather than a fully specified Extreme-RGMT-v1
-      # protocol. Explicit recovery tasks opt in with RECOVERY_PROBABILITY.
+      # Optional recovery behavior follows RGMT. Explicit recovery tasks opt in
+      # with RECOVERY_PROBABILITY.
       recovery_probability=recovery_probability,
       recovery_window_s=RECOVERY_WINDOW_S,
       recovery_assist_force_range=RECOVERY_ASSIST_FORCE_N,
