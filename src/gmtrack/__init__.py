@@ -1,4 +1,4 @@
-"""GMTrack: continual learning of highly dynamic humanoid skills.
+"""GMTrack: a customized RGMT-based tracker for highly dynamic humanoid skills.
 
 Built on top of mjlab. Importing this package registers every task with mjlab's
 registry; mjlab auto-imports it through the
