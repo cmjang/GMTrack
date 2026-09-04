@@ -110,7 +110,7 @@ uv run python -m gmtrack.scripts.audit_ground_clearance \
 Replay the reference with a zero-action policy to sanity-check a manifest:
 
 ```bash
-uv run play GMTrack-Stage1-Flat-Unitree-G1 --agent zero
+uv run play <task-id> --agent zero
 ```
 
 ### 2. Stage I
@@ -119,7 +119,7 @@ Environment count and iteration budget are baked into the task configuration, so
 scale flags are needed:
 
 ```bash
-uv run train GMTrack-Stage1-Flat-Unitree-G1
+uv run train <stage1-task-id>
 ```
 
 ### 3. Stratification
@@ -141,7 +141,7 @@ as a set; hand-edited splits fail closed. Against paper Table V, `D_c` should la
 ### 4. Stage II
 
 ```bash
-uv run train GMTrack-Stage2-Flat-Unitree-G1 \
+uv run train <stage2-task-id> \
     --agent.algorithm.base-checkpoint logs/rsl_rl/gmtrack_stage1/<run>/model_99999.pt
 ```
 
@@ -171,8 +171,6 @@ training motion sampler.
 
 | Task ID | Description |
 |---|---|
-| `GMTrack-Stage1-Flat-Unitree-G1` | Stage I, paper-default command window |
-| `GMTrack-Stage2-Flat-Unitree-G1` | Stage II, paper-default command window |
 | `GMTrack-Stage1-Heading-Flat-Unitree-G1` | Stage I with heading feedback |
 | `GMTrack-Stage2-Heading-Flat-Unitree-G1` | Stage II with heading feedback |
 | `GMTrack-Stage1-Causal-Flat-Unitree-G1` | Stage I, past-only command window |
