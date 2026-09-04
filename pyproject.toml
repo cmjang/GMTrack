@@ -1,7 +1,7 @@
 [project]
 name = "gmtrack"
 version = "0.1.0"
-description = "A heavily customized RGMT-based humanoid motion tracker for the Unitree G1"
+description = "An RGMT-based humanoid motion tracker for the Unitree G1"
 readme = "README.md"
 requires-python = ">=3.10,<3.14"
 dependencies = [

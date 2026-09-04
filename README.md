@@ -6,9 +6,8 @@ as an external task package for [mjlab](https://github.com/mujocolab/mjlab).
 [![Built on mjlab](https://img.shields.io/badge/built%20on-mjlab-4c1.svg)](https://github.com/mujocolab/mjlab)
 [![Python](https://img.shields.io/badge/python-3.10%E2%80%933.13-blue.svg)](https://www.python.org/)
 
-GMTrack is a heavily customized implementation based on RGMT, adapted to the
-mjlab/BeyondMimic stack with a two-stage continual-learning pipeline for dynamic
-humanoid motion tracking.
+GMTrack is an RGMT-based implementation adapted to the mjlab/BeyondMimic stack for
+dynamic humanoid motion tracking.
 
 mjlab already ships a BeyondMimic reimplementation under `mjlab/tasks/tracking/`, so
 GMTrack plugs into mjlab instead of forking it: tasks register through mjlab's
