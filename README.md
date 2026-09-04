@@ -255,8 +255,11 @@ Conventions:
 | `src/gmtrack/motion_grounding.py` | collision-geometry ground alignment |
 | `src/gmtrack/scripts/` | data preparation, stratification, evaluation, viewers |
 
-## Dependencies
+## References
 
+GMTrack draws on ideas from the following related papers and open-source projects:
+
+- RGMT
 - [InstinctLab](https://github.com/project-instinct/InstinctLab) and
   [SONIC](https://github.com/NVlabs/GR00T-WholeBodyControl).
 - [mjlab](https://github.com/mujocolab/mjlab) and
